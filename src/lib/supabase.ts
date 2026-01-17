@@ -9,7 +9,23 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(
   supabaseUrl || '',
-  supabaseAnonKey || ''
+  supabaseAnonKey || '',
+  {
+    auth: {
+      // Persist session in localStorage for longer sessions
+      persistSession: true,
+      // Use localStorage for better persistence across browser sessions
+      storage: localStorage,
+      // Unique storage key for this app
+      storageKey: 'open-router-ui-auth',
+      // Auto-refresh tokens before they expire
+      autoRefreshToken: true,
+      // Detect session from URL (for OAuth callbacks)
+      detectSessionInUrl: true,
+      // Flow type for PKCE
+      flowType: 'pkce',
+    },
+  }
 )
 
 // Database types

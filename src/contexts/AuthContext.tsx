@@ -127,36 +127,122 @@ export function AuthProvider({ children }: AuthProviderProps) {
   useEffect(() => {
     let isMounted = true
     const profileSubscription: ReturnType<typeof supabase.channel> | null = null
+    let cachedUser: User | null = null
+    let cachedSessionData: Session | null = null
 
-    // Get initial session
+    // Get initial session with timeout
     const initializeAuth = async () => {
+      // First, try to quickly get session from localStorage cache
+      const cachedSession = localStorage.getItem('open-router-ui-auth')
+      if (cachedSession) {
+        try {
+          const parsed = JSON.parse(cachedSession)
+          if (parsed?.access_token && parsed?.user) {
+            // Check if token is not expired (with some buffer)
+            const expiresAt = parsed.expires_at
+            const now = Math.floor(Date.now() / 1000)
+            const isValid = !expiresAt || expiresAt > now - 60 // Allow 60 seconds buffer
+            
+            if (isValid) {
+              // We have a valid cached session, set it immediately for faster UX
+              cachedUser = parsed.user as User
+              cachedSessionData = parsed as Session
+              if (isMounted) {
+                setUser(cachedUser)
+                setSession(cachedSessionData)
+                // If we have a cached session, set loading to false quickly
+                // This prevents the "sign in" popup from showing
+                setLoading(false)
+              }
+            }
+          }
+        } catch {
+          // Ignore parsing errors
+        }
+      }
+
+      // Set a timeout to prevent infinite loading - only matters if no cached session
+      const loadingTimeout = setTimeout(() => {
+        if (isMounted && loading) {
+          console.warn('Auth initialization timed out')
+          // If we had a cached session, keep using it
+          if (cachedUser && cachedSessionData) {
+            console.log('Using cached session after timeout')
+            setUser(cachedUser)
+            setSession(cachedSessionData)
+          }
+          setLoading(false)
+        }
+      }, 15000) // 15 second timeout (increased from 5)
+
       try {
+        // Now verify/refresh the session with Supabase in the background
         const { data: { session }, error } = await supabase.auth.getSession()
+        
+        clearTimeout(loadingTimeout)
         
         if (error) {
           console.error('Error getting session:', error)
-        }
-        
-        if (isMounted) {
-          setSession(session)
-          setUser(session?.user ?? null)
-          
-          if (session?.user) {
-            try {
-              await fetchProfile(session.user.id)
-              const remaining = await getRemainingMessages(session.user.id)
+          // If we have a cached session and the network request failed, keep using it
+          if (cachedUser && cachedSessionData && isMounted) {
+            console.log('Network error but using cached session')
+            setUser(cachedUser)
+            setSession(cachedSessionData)
+            setLoading(false)
+            
+            // Still try to fetch profile with cached user
+            fetchProfile(cachedUser.id).catch((profileError) => {
+              console.error('Error fetching profile:', profileError)
+            })
+            
+            getRemainingMessages(cachedUser.id).then((remaining) => {
               if (isMounted) {
                 setRemainingMessages(remaining)
               }
-            } catch (profileError) {
-              console.error('Error fetching profile:', profileError)
-            }
+            }).catch((err) => {
+              console.error('Error fetching remaining messages:', err)
+            })
+            return
           }
-          
+        }
+        
+        if (isMounted) {
+          // Update with fresh session data
+          setSession(session)
+          setUser(session?.user ?? null)
           setLoading(false)
+          
+          if (session?.user) {
+            // Fetch profile in the background (non-blocking)
+            fetchProfile(session.user.id).catch((profileError) => {
+              console.error('Error fetching profile:', profileError)
+            })
+            
+            getRemainingMessages(session.user.id).then((remaining) => {
+              if (isMounted) {
+                setRemainingMessages(remaining)
+              }
+            }).catch((err) => {
+              console.error('Error fetching remaining messages:', err)
+            })
+          }
         }
       } catch (error) {
         console.error('Auth initialization error:', error)
+        clearTimeout(loadingTimeout)
+        
+        // If we have a cached session and there was an error, keep using it
+        if (cachedUser && cachedSessionData && isMounted) {
+          console.log('Error occurred but using cached session')
+          setUser(cachedUser)
+          setSession(cachedSessionData)
+          
+          // Still try to fetch profile with cached user
+          fetchProfile(cachedUser.id).catch((profileError) => {
+            console.error('Error fetching profile:', profileError)
+          })
+        }
+        
         if (isMounted) {
           setLoading(false)
         }
