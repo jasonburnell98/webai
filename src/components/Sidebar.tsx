@@ -14,14 +14,20 @@ interface SidebarProps {
   onDeleteChat: (id: string) => void
   theme: 'light' | 'dark'
   onToggleTheme: () => void
+  onClose?: () => void
 }
 
-function Sidebar({ chats, currentChatId, onNewChat, onSelectChat, onDeleteChat, theme, onToggleTheme }: SidebarProps) {
+function Sidebar({ chats, currentChatId, onNewChat, onSelectChat, onDeleteChat, theme, onToggleTheme, onClose }: SidebarProps) {
   const location = useLocation()
 
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
+        {onClose && (
+          <button className="sidebar-close-btn" onClick={onClose} title="Close menu">
+            ✕
+          </button>
+        )}
         <button className="new-chat-btn" onClick={onNewChat}>
           <span className="plus-icon">+</span>
           New Chat
@@ -32,12 +38,14 @@ function Sidebar({ chats, currentChatId, onNewChat, onSelectChat, onDeleteChat, 
         <Link 
           to="/" 
           className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}
+          onClick={onClose}
         >
           💬 Chat
         </Link>
         <Link 
           to="/admin" 
           className={`nav-link ${location.pathname === '/admin' ? 'active' : ''}`}
+          onClick={onClose}
         >
           ⚙️ Admin
         </Link>

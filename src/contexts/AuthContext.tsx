@@ -44,45 +44,123 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   const tier = profile?.tier || 'free'
 
-  // Fetch user profile from database
-  const fetchProfile = async (userId: string) => {
-    const { data, error } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('id', userId)
-      .single()
-
-    if (error) {
-      console.error('Error fetching profile:', error)
-      // Profile doesn't exist, create one
-      if (error.code === 'PGRST116') {
-        const { data: userData } = await supabase.auth.getUser()
-        if (userData.user) {
-          const newProfile = {
-            id: userId,
-            email: userData.user.email || '',
-            tier: 'free' as const,
-            messages_used_today: 0,
-            last_usage_reset: new Date().toISOString(),
-          }
-          
-          const { data: createdProfile, error: createError } = await supabase
-            .from('user_profiles')
-            .insert(newProfile)
-            .select()
-            .single()
-
-          if (!createError && createdProfile) {
-            setProfile(createdProfile)
-            return createdProfile
-          }
-        }
+  // Fetch user profile from database using direct REST API to avoid AbortController issues
+  const fetchProfile = async (userId: string, emailFromSession?: string, accessToken?: string) => {
+    console.log('🔍 Fetching profile for user ID:', userId)
+    
+    const userEmail = emailFromSession
+    console.log('📧 User email:', userEmail)
+    
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+    
+    // Get the current session's access token for RLS authentication
+    let authToken = accessToken
+    if (!authToken) {
+      try {
+        const { data: { session: currentSession } } = await supabase.auth.getSession()
+        authToken = currentSession?.access_token
+      } catch (e) {
+        console.warn('⚠️ Could not get access token:', e)
       }
-      return null
+    }
+    console.log('🔐 Auth token available:', !!authToken)
+    
+    // Use direct fetch to bypass Supabase client's AbortController
+    const fetchProfileDirect = async (filter: string): Promise<UserProfile | null> => {
+      try {
+        const response = await fetch(
+          `${supabaseUrl}/rest/v1/user_profiles?${filter}&select=*`,
+          {
+            headers: {
+              'apikey': supabaseKey,
+              'Authorization': `Bearer ${authToken || supabaseKey}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        )
+        
+        if (!response.ok) {
+          console.warn('⚠️ Profile fetch response not ok:', response.status)
+          return null
+        }
+        
+        const data = await response.json()
+        console.log('📊 Direct fetch result:', data)
+        
+        if (Array.isArray(data) && data.length > 0) {
+          return data[0] as UserProfile
+        }
+        return null
+      } catch (e) {
+        console.error('❌ Direct fetch error:', e)
+        return null
+      }
+    }
+    
+    // First try to fetch by user ID
+    let profileData = await fetchProfileDirect(`id=eq.${userId}`)
+    
+    if (profileData) {
+      console.log('✅ Found profile by ID with tier:', profileData.tier)
+      setProfile(profileData)
+      return profileData
     }
 
-    setProfile(data)
-    return data
+    // Try to find by email (in case user signed in via different auth method)
+    if (userEmail) {
+      console.log('🔍 Trying to find profile by email:', userEmail)
+      profileData = await fetchProfileDirect(`email=eq.${encodeURIComponent(userEmail)}`)
+      
+      if (profileData) {
+        console.log('✅ Found profile by email with tier:', profileData.tier)
+        setProfile(profileData)
+        return profileData
+      }
+    }
+
+    // Profile doesn't exist by ID or email, create one
+    console.log('📝 Creating new profile for user...')
+    if (userEmail) {
+      try {
+        const newProfile = {
+          id: userId,
+          email: userEmail,
+          tier: 'free' as const,
+          messages_used_today: 0,
+          last_usage_reset: new Date().toISOString(),
+        }
+        
+        const response = await fetch(
+          `${supabaseUrl}/rest/v1/user_profiles`,
+          {
+            method: 'POST',
+            headers: {
+              'apikey': supabaseKey,
+              'Authorization': `Bearer ${supabaseKey}`,
+              'Content-Type': 'application/json',
+              'Prefer': 'return=representation',
+            },
+            body: JSON.stringify(newProfile),
+          }
+        )
+        
+        if (response.ok) {
+          const data = await response.json()
+          if (Array.isArray(data) && data.length > 0) {
+            console.log('✅ Created new profile with tier:', data[0].tier)
+            setProfile(data[0] as UserProfile)
+            return data[0] as UserProfile
+          }
+        } else {
+          console.error('❌ Error creating profile:', response.status)
+        }
+      } catch (e) {
+        console.error('❌ Error creating profile:', e)
+      }
+    }
+    
+    return null
   }
 
   // Refresh usage count
@@ -98,7 +176,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   // Refresh profile
   const refreshProfile = async () => {
     if (user) {
-      await fetchProfile(user.id)
+      await fetchProfile(user.id, user.email)
       await refreshUsage()
     }
   }
@@ -144,15 +222,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
             const isValid = !expiresAt || expiresAt > now - 60 // Allow 60 seconds buffer
             
             if (isValid) {
-              // We have a valid cached session, set it immediately for faster UX
+              // We have a valid cached session, set user/session immediately
+              // but DON'T set loading=false yet - wait for profile to load
               cachedUser = parsed.user as User
               cachedSessionData = parsed as Session
               if (isMounted) {
                 setUser(cachedUser)
                 setSession(cachedSessionData)
-                // If we have a cached session, set loading to false quickly
-                // This prevents the "sign in" popup from showing
-                setLoading(false)
+                // Note: We intentionally don't set loading=false here anymore
+                // to ensure profile (and tier) is loaded before UI renders
               }
             }
           }
@@ -190,8 +268,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
             setSession(cachedSessionData)
             setLoading(false)
             
-            // Still try to fetch profile with cached user
-            fetchProfile(cachedUser.id).catch((profileError) => {
+            // Still try to fetch profile with cached user (pass email from cached user)
+            fetchProfile(cachedUser.id, cachedUser.email).catch((profileError: unknown) => {
               console.error('Error fetching profile:', profileError)
             })
             
@@ -210,22 +288,23 @@ export function AuthProvider({ children }: AuthProviderProps) {
           // Update with fresh session data
           setSession(session)
           setUser(session?.user ?? null)
-          setLoading(false)
           
           if (session?.user) {
-            // Fetch profile in the background (non-blocking)
-            fetchProfile(session.user.id).catch((profileError) => {
-              console.error('Error fetching profile:', profileError)
-            })
-            
-            getRemainingMessages(session.user.id).then((remaining) => {
+            // Fetch profile BEFORE setting loading to false
+            // This ensures tier is correctly loaded before UI renders
+            try {
+              await fetchProfile(session.user.id, session.user.email, session.access_token)
+              const remaining = await getRemainingMessages(session.user.id)
               if (isMounted) {
                 setRemainingMessages(remaining)
               }
-            }).catch((err) => {
-              console.error('Error fetching remaining messages:', err)
-            })
+            } catch (profileError) {
+              console.error('Error fetching profile:', profileError)
+            }
           }
+          
+          // Only set loading to false AFTER profile is fetched
+          setLoading(false)
         }
       } catch (error) {
         console.error('Auth initialization error:', error)
@@ -237,8 +316,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
           setUser(cachedUser)
           setSession(cachedSessionData)
           
-          // Still try to fetch profile with cached user
-          fetchProfile(cachedUser.id).catch((profileError) => {
+          // Still try to fetch profile with cached user (pass email from cached user)
+          fetchProfile(cachedUser.id, cachedUser.email).catch((profileError: unknown) => {
             console.error('Error fetching profile:', profileError)
           })
         }
@@ -261,7 +340,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         
         if (session?.user) {
           try {
-            await fetchProfile(session.user.id)
+            await fetchProfile(session.user.id, session.user.email, session.access_token)
             const remaining = await getRemainingMessages(session.user.id)
             if (isMounted) {
               setRemainingMessages(remaining)
@@ -352,11 +431,20 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }
 
   const signOut = async () => {
-    await supabase.auth.signOut()
+    // Clear state first to trigger immediate UI update
     setUser(null)
     setSession(null)
     setProfile(null)
     setRemainingMessages(0)
+    
+    // Clear cached session from localStorage
+    localStorage.removeItem('open-router-ui-auth')
+    
+    // Sign out from Supabase (don't await - we've already cleared local state)
+    // This prevents AbortError from being thrown when component unmounts
+    supabase.auth.signOut().catch(() => {
+      // Ignore any errors during sign out
+    })
   }
 
   const value = {
