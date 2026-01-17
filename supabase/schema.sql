@@ -1,4 +1,4 @@
--- webAI - Supabase Database Schema
+-- aiWeb - Supabase Database Schema
 -- Run this in your Supabase SQL Editor to set up the required tables
 
 -- Enable UUID extension

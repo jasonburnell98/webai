@@ -66,12 +66,12 @@ function AppContent() {
   const { user, signOut, tier, canUseModel, remainingMessages, consumeMessage } = useAuth()
   
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('webai_theme')
+    const saved = localStorage.getItem('aiweb_theme')
     return (saved as 'light' | 'dark') || 'dark'
   })
 
   const [chats, setChats] = useState<Chat[]>(() => {
-    const saved = localStorage.getItem('webai_chats')
+    const saved = localStorage.getItem('aiweb_chats')
     if (saved) {
       try {
         const parsed = JSON.parse(saved)
@@ -86,32 +86,32 @@ function AppContent() {
     return []
   })
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => {
-    return localStorage.getItem('webai_current_chat') || null
+    return localStorage.getItem('aiweb_current_chat') || null
   })
-  const [apiKey] = useState(() => localStorage.getItem('webai_api_key') || '')
+  const [apiKey] = useState(() => localStorage.getItem('aiweb_api_key') || '')
   const [selectedModel, setSelectedModel] = useState(() => 
-    localStorage.getItem('webai_model') || 'meta-llama/llama-3.1-70b-instruct'
+    localStorage.getItem('aiweb_model') || 'meta-llama/llama-3.1-70b-instruct'
   )
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   // Save chats to localStorage whenever they change
   useEffect(() => {
-    localStorage.setItem('webai_chats', JSON.stringify(chats))
+    localStorage.setItem('aiweb_chats', JSON.stringify(chats))
   }, [chats])
 
   // Save current chat ID
   useEffect(() => {
     if (currentChatId) {
-      localStorage.setItem('webai_current_chat', currentChatId)
+      localStorage.setItem('aiweb_current_chat', currentChatId)
     } else {
-      localStorage.removeItem('webai_current_chat')
+      localStorage.removeItem('aiweb_current_chat')
     }
   }, [currentChatId])
 
   // Apply theme to document
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
-    localStorage.setItem('webai_theme', theme)
+    localStorage.setItem('aiweb_theme', theme)
   }, [theme])
 
   const toggleTheme = () => {
@@ -203,7 +203,7 @@ function AppContent() {
           >
             ☰
           </button>
-          <h1>webAI</h1>
+          <h1>aiWeb</h1>
           <div className="header-actions">
             <span className={`model-badge ${!canUseModel(selectedModel) ? 'locked' : ''}`} title="Current model">
               {!canUseModel(selectedModel) && '🔒 '}

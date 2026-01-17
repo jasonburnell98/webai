@@ -106,7 +106,7 @@ function ChatPage({
         headers: {
           'Authorization': `Bearer ${effectiveApiKey}`,
           'HTTP-Referer': window.location.origin,
-          'X-Title': 'webAI',
+          'X-Title': 'aiWeb',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -170,7 +170,7 @@ function ChatPage({
         <div className="messages">
           {messages.length === 0 && (
             <div className="welcome-message">
-              <h2>Welcome to webAI!</h2>
+              <h2>Welcome to aiWeb!</h2>
               <p>Start a conversation by typing a message below.</p>
               <p className="model-info">
                 Using model: <code className={modelLocked ? 'locked' : ''}>{selectedModel}</code>

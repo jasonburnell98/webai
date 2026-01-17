@@ -74,7 +74,7 @@ function AuthPage({ mode }: AuthPageProps) {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <h1>webAI</h1>
+          <h1>aiWeb</h1>
           <p>{mode === 'login' ? 'Sign in to your account' : 'Create a new account'}</p>
         </div>
 

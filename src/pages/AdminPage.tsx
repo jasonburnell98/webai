@@ -37,7 +37,7 @@ function AdminPage({ selectedModel, onModelChange, canUseModel, tier }: AdminPag
   const handleModelSelect = (modelId: string) => {
     if (canUseModel(modelId)) {
       onModelChange(modelId)
-      localStorage.setItem('webai_model', modelId)
+      localStorage.setItem('aiweb_model', modelId)
     }
   }
 

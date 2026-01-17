@@ -1,4 +1,4 @@
-# webAI
+# aiWeb
 
 A modern AI chat interface with authentication, subscription tiers, and usage limits. Access multiple AI models through a unified, beautiful interface.
 
@@ -25,7 +25,7 @@ A modern AI chat interface with authentication, subscription tiers, and usage li
 
 ```bash
 git clone <your-repo>
-cd webai
+cd aiweb
 npm install
 ```
 
