@@ -152,8 +152,138 @@ GRANT ALL ON user_profiles TO authenticated;
 GRANT ALL ON usage_logs TO authenticated;
 GRANT EXECUTE ON FUNCTION increment_message_usage TO authenticated;
 
+-- =============================================
+-- CHAT PERSISTENCE TABLES
+-- =============================================
+
+-- Conversations Table
+-- Stores chat conversation metadata for each user
+CREATE TABLE IF NOT EXISTS conversations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT 'New Chat',
+  model_id TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Create indexes for faster lookups
+CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at DESC);
+
+-- Enable Row Level Security
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for conversations
+-- Users can only see their own conversations
+CREATE POLICY "Users can read own conversations" ON conversations
+  FOR SELECT
+  USING (auth.uid() = user_id);
+
+-- Users can insert their own conversations
+CREATE POLICY "Users can insert own conversations" ON conversations
+  FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+-- Users can update their own conversations
+CREATE POLICY "Users can update own conversations" ON conversations
+  FOR UPDATE
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+-- Users can delete their own conversations
+CREATE POLICY "Users can delete own conversations" ON conversations
+  FOR DELETE
+  USING (auth.uid() = user_id);
+
+-- Messages Table
+-- Stores individual messages within conversations
+CREATE TABLE IF NOT EXISTS messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Create indexes for faster lookups
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+
+-- Enable Row Level Security
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for messages
+-- Users can only see messages from their own conversations
+CREATE POLICY "Users can read own messages" ON messages
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM conversations 
+      WHERE conversations.id = messages.conversation_id 
+      AND conversations.user_id = auth.uid()
+    )
+  );
+
+-- Users can insert messages to their own conversations
+CREATE POLICY "Users can insert own messages" ON messages
+  FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM conversations 
+      WHERE conversations.id = messages.conversation_id 
+      AND conversations.user_id = auth.uid()
+    )
+  );
+
+-- Users can update messages in their own conversations
+CREATE POLICY "Users can update own messages" ON messages
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM conversations 
+      WHERE conversations.id = messages.conversation_id 
+      AND conversations.user_id = auth.uid()
+    )
+  );
+
+-- Users can delete messages from their own conversations
+CREATE POLICY "Users can delete own messages" ON messages
+  FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1 FROM conversations 
+      WHERE conversations.id = messages.conversation_id 
+      AND conversations.user_id = auth.uid()
+    )
+  );
+
+-- Function to update conversation's updated_at timestamp
+CREATE OR REPLACE FUNCTION update_conversation_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+  UPDATE conversations 
+  SET updated_at = NOW() 
+  WHERE id = NEW.conversation_id;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to auto-update conversation timestamp when messages are added
+DROP TRIGGER IF EXISTS on_message_added ON messages;
+CREATE TRIGGER on_message_added
+  AFTER INSERT ON messages
+  FOR EACH ROW EXECUTE FUNCTION update_conversation_timestamp();
+
+-- Grant permissions for conversations and messages
+GRANT ALL ON conversations TO authenticated;
+GRANT ALL ON messages TO authenticated;
+
 -- Comments
 COMMENT ON TABLE user_profiles IS 'User profile data including subscription tier and usage tracking';
 COMMENT ON TABLE usage_logs IS 'Log of AI model usage for analytics';
+COMMENT ON TABLE conversations IS 'Chat conversation metadata for each user';
+COMMENT ON TABLE messages IS 'Individual messages within conversations';
 COMMENT ON FUNCTION increment_message_usage IS 'Safely increment message usage counter with tier check';
 COMMENT ON FUNCTION reset_daily_usage IS 'Reset daily message counters for free users';
+COMMENT ON FUNCTION update_conversation_timestamp IS 'Auto-update conversation timestamp when messages are added';

@@ -15,9 +15,10 @@ interface SidebarProps {
   theme: 'light' | 'dark'
   onToggleTheme: () => void
   onClose?: () => void
+  isLoading?: boolean
 }
 
-function Sidebar({ chats, currentChatId, onNewChat, onSelectChat, onDeleteChat, theme, onToggleTheme, onClose }: SidebarProps) {
+function Sidebar({ chats, currentChatId, onNewChat, onSelectChat, onDeleteChat, theme, onToggleTheme, onClose, isLoading }: SidebarProps) {
   const location = useLocation()
 
   return (
@@ -53,7 +54,12 @@ function Sidebar({ chats, currentChatId, onNewChat, onSelectChat, onDeleteChat, 
 
       <div className="chat-list">
         <h3>Recent Chats</h3>
-        {chats.length === 0 ? (
+        {isLoading ? (
+          <div className="chats-loading">
+            <div className="loading-spinner-small"></div>
+            <p>Loading chats...</p>
+          </div>
+        ) : chats.length === 0 ? (
           <p className="no-chats">No chats yet</p>
         ) : (
           <ul>

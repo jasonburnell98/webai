@@ -49,6 +49,28 @@ export interface UsageLog {
   created_at: string
 }
 
+// Chat types
+export interface Conversation {
+  id: string
+  user_id: string
+  title: string
+  model_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface Message {
+  id: string
+  conversation_id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  created_at: string
+}
+
+export interface ConversationWithMessages extends Conversation {
+  messages: Message[]
+}
+
 // Tier limits
 export const TIER_LIMITS = {
   free: {
@@ -146,4 +168,176 @@ export async function incrementMessageUsage(userId: string): Promise<boolean> {
   }
 
   return true
+}
+
+// =============================================
+// CONVERSATION CRUD OPERATIONS
+// =============================================
+
+// Get all conversations for a user (ordered by most recent)
+export async function getConversations(userId: string): Promise<Conversation[]> {
+  const { data, error } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+
+  if (error) {
+    console.error('Error fetching conversations:', error)
+    return []
+  }
+
+  return data || []
+}
+
+// Get a single conversation with all its messages
+export async function getConversationWithMessages(conversationId: string): Promise<ConversationWithMessages | null> {
+  const { data: conversation, error: convError } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('id', conversationId)
+    .single()
+
+  if (convError || !conversation) {
+    console.error('Error fetching conversation:', convError)
+    return null
+  }
+
+  const { data: messages, error: msgError } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: true })
+
+  if (msgError) {
+    console.error('Error fetching messages:', msgError)
+    return { ...conversation, messages: [] }
+  }
+
+  return { ...conversation, messages: messages || [] }
+}
+
+// Create a new conversation
+export async function createConversation(
+  userId: string, 
+  title: string = 'New Chat',
+  modelId?: string
+): Promise<Conversation | null> {
+  const { data, error } = await supabase
+    .from('conversations')
+    .insert({
+      user_id: userId,
+      title,
+      model_id: modelId || null,
+    })
+    .select()
+    .single()
+
+  if (error) {
+    console.error('Error creating conversation:', error)
+    return null
+  }
+
+  return data
+}
+
+// Update conversation title
+export async function updateConversationTitle(
+  conversationId: string, 
+  title: string
+): Promise<boolean> {
+  const { error } = await supabase
+    .from('conversations')
+    .update({ title, updated_at: new Date().toISOString() })
+    .eq('id', conversationId)
+
+  if (error) {
+    console.error('Error updating conversation:', error)
+    return false
+  }
+
+  return true
+}
+
+// Delete a conversation (messages are cascade deleted)
+export async function deleteConversation(conversationId: string): Promise<boolean> {
+  const { error } = await supabase
+    .from('conversations')
+    .delete()
+    .eq('id', conversationId)
+
+  if (error) {
+    console.error('Error deleting conversation:', error)
+    return false
+  }
+
+  return true
+}
+
+// =============================================
+// MESSAGE CRUD OPERATIONS
+// =============================================
+
+// Add a message to a conversation
+export async function addMessage(
+  conversationId: string,
+  role: 'user' | 'assistant' | 'system',
+  content: string
+): Promise<Message | null> {
+  const { data, error } = await supabase
+    .from('messages')
+    .insert({
+      conversation_id: conversationId,
+      role,
+      content,
+    })
+    .select()
+    .single()
+
+  if (error) {
+    console.error('Error adding message:', error)
+    return null
+  }
+
+  return data
+}
+
+// Add multiple messages at once (for batch saving)
+export async function addMessages(
+  conversationId: string,
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>
+): Promise<Message[]> {
+  const messagesToInsert = messages.map(msg => ({
+    conversation_id: conversationId,
+    role: msg.role,
+    content: msg.content,
+  }))
+
+  const { data, error } = await supabase
+    .from('messages')
+    .insert(messagesToInsert)
+    .select()
+
+  if (error) {
+    console.error('Error adding messages:', error)
+    return []
+  }
+
+  return data || []
+}
+
+// Get messages for a conversation
+export async function getMessages(conversationId: string): Promise<Message[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: true })
+
+  if (error) {
+    console.error('Error fetching messages:', error)
+    return []
+  }
+
+  return data || []
 }

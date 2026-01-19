@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { BrowserRouter as Router, Routes, Route, useNavigate, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Sidebar from './components/Sidebar'
@@ -7,6 +7,16 @@ import ChatPage from './pages/ChatPage'
 import AdminPage from './pages/AdminPage'
 import AuthPage from './pages/AuthPage'
 import PricingPage from './pages/PricingPage'
+import {
+  getConversations,
+  getConversationWithMessages,
+  createConversation,
+  updateConversationTitle,
+  deleteConversation as deleteConversationFromDb,
+  addMessage,
+  type Conversation,
+  type Message as DbMessage,
+} from './lib/supabase'
 import './App.css'
 
 interface Message {
@@ -50,24 +60,9 @@ function AppContent() {
     return (saved as 'light' | 'dark') || 'dark'
   })
 
-  const [chats, setChats] = useState<Chat[]>(() => {
-    const saved = localStorage.getItem('aiweb_chats')
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved)
-        return parsed.map((chat: Chat) => ({
-          ...chat,
-          createdAt: new Date(chat.createdAt)
-        }))
-      } catch {
-        return []
-      }
-    }
-    return []
-  })
-  const [currentChatId, setCurrentChatId] = useState<string | null>(() => {
-    return localStorage.getItem('aiweb_current_chat') || null
-  })
+  const [chats, setChats] = useState<Chat[]>([])
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null)
+  const [chatsLoading, setChatsLoading] = useState(true)
   const [apiKey] = useState(() => localStorage.getItem('aiweb_api_key') || '')
   const [selectedModel, setSelectedModel] = useState(() => 
     localStorage.getItem('aiweb_model') || 'meta-llama/llama-3.1-70b-instruct'
@@ -77,19 +72,74 @@ function AppContent() {
     return window.innerWidth > 768
   })
 
-  // Save chats to localStorage whenever they change
-  useEffect(() => {
-    localStorage.setItem('aiweb_chats', JSON.stringify(chats))
-  }, [chats])
+  // Load chats from Supabase when user logs in
+  const loadChats = useCallback(async () => {
+    if (!user) {
+      setChats([])
+      setCurrentChatId(null)
+      setChatsLoading(false)
+      return
+    }
 
-  // Save current chat ID
+    setChatsLoading(true)
+    try {
+      const conversations = await getConversations(user.id)
+      
+      // Convert Supabase conversations to local Chat format
+      const loadedChats: Chat[] = conversations.map((conv: Conversation) => ({
+        id: conv.id,
+        title: conv.title,
+        messages: [], // Messages will be loaded on demand
+        createdAt: new Date(conv.created_at)
+      }))
+      
+      setChats(loadedChats)
+      
+      // Select the most recent chat if one exists and none is selected
+      if (loadedChats.length > 0 && !currentChatId) {
+        setCurrentChatId(loadedChats[0].id)
+      }
+    } catch (error) {
+      console.error('Error loading chats:', error)
+    } finally {
+      setChatsLoading(false)
+    }
+  }, [user, currentChatId])
+
+  // Load messages for the current chat
+  const loadCurrentChatMessages = useCallback(async () => {
+    if (!currentChatId || !user) return
+
+    try {
+      const conversation = await getConversationWithMessages(currentChatId)
+      if (conversation) {
+        const messages: Message[] = conversation.messages.map((msg: DbMessage) => ({
+          role: msg.role as 'user' | 'assistant',
+          content: msg.content
+        }))
+        
+        setChats(prev => prev.map(chat => 
+          chat.id === currentChatId 
+            ? { ...chat, messages, title: conversation.title }
+            : chat
+        ))
+      }
+    } catch (error) {
+      console.error('Error loading messages:', error)
+    }
+  }, [currentChatId, user])
+
+  // Load chats when user changes
+  useEffect(() => {
+    loadChats()
+  }, [user?.id]) // Only re-run when user ID changes
+
+  // Load messages when current chat changes
   useEffect(() => {
     if (currentChatId) {
-      localStorage.setItem('aiweb_current_chat', currentChatId)
-    } else {
-      localStorage.removeItem('aiweb_current_chat')
+      loadCurrentChatMessages()
     }
-  }, [currentChatId])
+  }, [currentChatId]) // Only re-run when currentChatId changes
 
   // Apply theme to document
   useEffect(() => {
@@ -110,15 +160,24 @@ function AppContent() {
     return firstMessage.length > 30 ? firstMessage.substring(0, 30) + '...' : firstMessage
   }
 
-  const createNewChat = () => {
-    const newChat: Chat = {
-      id: Date.now().toString(),
-      title: 'New Chat',
-      messages: [],
-      createdAt: new Date()
+  const createNewChat = async () => {
+    if (!user) return
+    
+    try {
+      const newConversation = await createConversation(user.id, 'New Chat', selectedModel)
+      if (newConversation) {
+        const newChat: Chat = {
+          id: newConversation.id,
+          title: newConversation.title,
+          messages: [],
+          createdAt: new Date(newConversation.created_at)
+        }
+        setChats(prev => [newChat, ...prev])
+        setCurrentChatId(newConversation.id)
+      }
+    } catch (error) {
+      console.error('Error creating new chat:', error)
     }
-    setChats(prev => [newChat, ...prev])
-    setCurrentChatId(newChat.id)
     navigate('/')
   }
 
@@ -127,32 +186,70 @@ function AppContent() {
     navigate('/')
   }
 
-  const deleteChat = (id: string) => {
-    setChats(prev => prev.filter(c => c.id !== id))
-    if (currentChatId === id) {
-      const remaining = chats.filter(c => c.id !== id)
-      setCurrentChatId(remaining.length > 0 ? remaining[0].id : null)
+  const deleteChat = async (id: string) => {
+    try {
+      const success = await deleteConversationFromDb(id)
+      if (success) {
+        setChats(prev => prev.filter(c => c.id !== id))
+        if (currentChatId === id) {
+          const remaining = chats.filter(c => c.id !== id)
+          setCurrentChatId(remaining.length > 0 ? remaining[0].id : null)
+        }
+      }
+    } catch (error) {
+      console.error('Error deleting chat:', error)
     }
   }
 
-  const updateMessages = (messages: Message[]) => {
+  const updateMessages = async (messages: Message[]) => {
+    if (!user) return
+
     if (!currentChatId) {
       // Create new chat if none exists
-      const newChat: Chat = {
-        id: Date.now().toString(),
-        title: generateChatTitle(messages),
-        messages,
-        createdAt: new Date()
+      try {
+        const title = generateChatTitle(messages)
+        const newConversation = await createConversation(user.id, title, selectedModel)
+        if (newConversation) {
+          // Save all messages to the new conversation
+          for (const msg of messages) {
+            await addMessage(newConversation.id, msg.role, msg.content)
+          }
+          
+          const newChat: Chat = {
+            id: newConversation.id,
+            title,
+            messages,
+            createdAt: new Date(newConversation.created_at)
+          }
+          setChats(prev => [newChat, ...prev])
+          setCurrentChatId(newConversation.id)
+        }
+      } catch (error) {
+        console.error('Error creating chat with messages:', error)
       }
-      setChats(prev => [newChat, ...prev])
-      setCurrentChatId(newChat.id)
     } else {
+      // Update existing chat
+      const existingChat = chats.find(c => c.id === currentChatId)
+      const existingMessageCount = existingChat?.messages.length || 0
+      
+      // Save new messages to Supabase
+      const newMessages = messages.slice(existingMessageCount)
+      for (const msg of newMessages) {
+        await addMessage(currentChatId, msg.role, msg.content)
+      }
+      
+      // Update title if it was "New Chat" and this is the first message
+      const newTitle = existingChat?.title === 'New Chat' ? generateChatTitle(messages) : existingChat?.title
+      if (newTitle !== existingChat?.title && newTitle) {
+        await updateConversationTitle(currentChatId, newTitle)
+      }
+      
       setChats(prev => prev.map(chat => {
         if (chat.id === currentChatId) {
           return {
             ...chat,
             messages,
-            title: chat.title === 'New Chat' ? generateChatTitle(messages) : chat.title
+            title: newTitle || chat.title
           }
         }
         return chat
@@ -232,6 +329,7 @@ function AppContent() {
         theme={theme}
         onToggleTheme={toggleTheme}
         onClose={() => setSidebarOpen(false)}
+        isLoading={chatsLoading}
       />
       
       <main className="main-content">
