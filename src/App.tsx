@@ -53,7 +53,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 
 function AppContent() {
   const navigate = useNavigate()
-  const { user, signOut, tier, canUseModel, remainingMessages, consumeMessage } = useAuth()
+  const { user, session, loading: authLoading, signOut, tier, canUseModel, remainingMessages, consumeMessage } = useAuth()
   
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('aiweb_theme')
@@ -129,10 +129,23 @@ function AppContent() {
     }
   }, [currentChatId, user])
 
-  // Load chats when user changes
+  // Load chats when auth is fully initialized and session is available
+  // Must wait for authLoading to be false to ensure Supabase client has proper session
   useEffect(() => {
-    loadChats()
-  }, [user?.id]) // Only re-run when user ID changes
+    // Don't do anything while auth is still loading
+    if (authLoading) {
+      return
+    }
+    
+    if (session?.access_token && user) {
+      loadChats()
+    } else if (!user) {
+      // No user, clear chats
+      setChats([])
+      setCurrentChatId(null)
+      setChatsLoading(false)
+    }
+  }, [authLoading, user?.id, session?.access_token]) // Re-run when auth loading completes or user/session changes
 
   // Load messages when current chat changes
   useEffect(() => {

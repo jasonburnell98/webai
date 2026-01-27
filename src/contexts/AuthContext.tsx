@@ -35,10 +35,36 @@ interface AuthProviderProps {
   children: ReactNode
 }
 
+// Local storage key for caching profile
+const PROFILE_CACHE_KEY = 'open-router-ui-profile'
+
+// Helper to cache profile to localStorage
+const cacheProfile = (profile: UserProfile | null) => {
+  if (profile) {
+    localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(profile))
+  } else {
+    localStorage.removeItem(PROFILE_CACHE_KEY)
+  }
+}
+
+// Helper to get cached profile from localStorage
+const getCachedProfile = (): UserProfile | null => {
+  try {
+    const cached = localStorage.getItem(PROFILE_CACHE_KEY)
+    if (cached) {
+      return JSON.parse(cached) as UserProfile
+    }
+  } catch {
+    // Ignore parsing errors
+  }
+  return null
+}
+
 export function AuthProvider({ children }: AuthProviderProps) {
+  // Initialize profile from cache to prevent flash of wrong tier
   const [user, setUser] = useState<User | null>(null)
   const [session, setSession] = useState<Session | null>(null)
-  const [profile, setProfile] = useState<UserProfile | null>(null)
+  const [profile, setProfile] = useState<UserProfile | null>(() => getCachedProfile())
   const [loading, setLoading] = useState(true)
   const [remainingMessages, setRemainingMessages] = useState(0)
 
@@ -68,20 +94,27 @@ export function AuthProvider({ children }: AuthProviderProps) {
     
     // Use direct fetch to bypass Supabase client's AbortController
     const fetchProfileDirect = async (filter: string): Promise<UserProfile | null> => {
+      // IMPORTANT: We must have a valid auth token to pass RLS policies
+      // Do NOT fall back to supabaseKey as it won't authenticate the user
+      if (!authToken) {
+        console.warn('⚠️ No auth token available for profile fetch')
+        return null
+      }
+      
       try {
         const response = await fetch(
           `${supabaseUrl}/rest/v1/user_profiles?${filter}&select=*`,
           {
             headers: {
               'apikey': supabaseKey,
-              'Authorization': `Bearer ${authToken || supabaseKey}`,
+              'Authorization': `Bearer ${authToken}`,
               'Content-Type': 'application/json',
             },
           }
         )
         
         if (!response.ok) {
-          console.warn('⚠️ Profile fetch response not ok:', response.status)
+          console.warn('⚠️ Profile fetch response not ok:', response.status, await response.text())
           return null
         }
         
@@ -104,6 +137,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (profileData) {
       console.log('✅ Found profile by ID with tier:', profileData.tier)
       setProfile(profileData)
+      cacheProfile(profileData)
       return profileData
     }
 
@@ -115,13 +149,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if (profileData) {
         console.log('✅ Found profile by email with tier:', profileData.tier)
         setProfile(profileData)
+        cacheProfile(profileData)
         return profileData
       }
     }
 
     // Profile doesn't exist by ID or email, create one
+    // IMPORTANT: Profile creation requires a valid auth token for RLS
     console.log('📝 Creating new profile for user...')
-    if (userEmail) {
+    if (userEmail && authToken) {
       try {
         const newProfile = {
           id: userId,
@@ -137,7 +173,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
             method: 'POST',
             headers: {
               'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
+              'Authorization': `Bearer ${authToken}`,
               'Content-Type': 'application/json',
               'Prefer': 'return=representation',
             },
@@ -149,15 +185,19 @@ export function AuthProvider({ children }: AuthProviderProps) {
           const data = await response.json()
           if (Array.isArray(data) && data.length > 0) {
             console.log('✅ Created new profile with tier:', data[0].tier)
-            setProfile(data[0] as UserProfile)
-            return data[0] as UserProfile
+            const createdProfile = data[0] as UserProfile
+            setProfile(createdProfile)
+            cacheProfile(createdProfile)
+            return createdProfile
           }
         } else {
-          console.error('❌ Error creating profile:', response.status)
+          console.error('❌ Error creating profile:', response.status, await response.text())
         }
       } catch (e) {
         console.error('❌ Error creating profile:', e)
       }
+    } else if (userEmail && !authToken) {
+      console.warn('⚠️ Cannot create profile - no auth token available')
     }
     
     return null
@@ -384,6 +424,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           console.log('Profile updated:', payload)
           const newProfile = payload.new as UserProfile
           setProfile(newProfile)
+          cacheProfile(newProfile)
           // If tier changed to pro, set remaining messages to infinity
           if (newProfile.tier === 'pro') {
             setRemainingMessages(Infinity)
@@ -437,8 +478,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
     setProfile(null)
     setRemainingMessages(0)
     
-    // Clear cached session from localStorage
+    // Clear cached session and profile from localStorage
     localStorage.removeItem('open-router-ui-auth')
+    cacheProfile(null)
     
     // Sign out from Supabase (don't await - we've already cleared local state)
     // This prevents AbortError from being thrown when component unmounts
