@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { BrowserRouter as Router, Routes, Route, useNavigate, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Sidebar from './components/Sidebar'
@@ -19,9 +19,23 @@ import {
 } from './lib/supabase'
 import './App.css'
 
+interface Attachment {
+  type: 'image'
+  url: string
+  name: string
+}
+
+interface GeneratedImage {
+  url: string
+  index: number
+}
+
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  attachments?: Attachment[]
+  reasoning?: string
+  generatedImages?: GeneratedImage[]
 }
 
 interface Chat {
@@ -62,6 +76,7 @@ function AppContent() {
 
   const [chats, setChats] = useState<Chat[]>([])
   const [currentChatId, setCurrentChatId] = useState<string | null>(null)
+  const currentChatIdRef = useRef<string | null>(null)
   const [chatsLoading, setChatsLoading] = useState(true)
   const [apiKey] = useState(() => localStorage.getItem('aiweb_api_key') || '')
   const [selectedModel, setSelectedModel] = useState(() => 
@@ -147,9 +162,14 @@ function AppContent() {
     }
   }, [authLoading, user?.id, session?.access_token]) // Re-run when auth loading completes or user/session changes
 
-  // Load messages when current chat changes
+  // Keep the ref in sync with state
   useEffect(() => {
-    if (currentChatId) {
+    currentChatIdRef.current = currentChatId
+  }, [currentChatId])
+
+  // Load messages when current chat changes (skip temp chats)
+  useEffect(() => {
+    if (currentChatId && !currentChatId.startsWith('temp-')) {
       loadCurrentChatMessages()
     }
   }, [currentChatId]) // Only re-run when currentChatId changes
@@ -217,10 +237,27 @@ function AppContent() {
   const updateMessages = async (messages: Message[]) => {
     if (!user) return
 
-    if (!currentChatId) {
+    // Use ref to always get the latest currentChatId, even in stale closures
+    const activeChatId = currentChatIdRef.current
+
+    if (!activeChatId) {
       // Create new chat if none exists
+      const title = generateChatTitle(messages)
+      
+      // Create a temporary local chat immediately so messages display right away
+      const tempId = 'temp-' + Date.now()
+      const tempChat: Chat = {
+        id: tempId,
+        title,
+        messages,
+        createdAt: new Date()
+      }
+      setChats(prev => [tempChat, ...prev])
+      setCurrentChatId(tempId)
+      currentChatIdRef.current = tempId
+
+      // Then try to persist to Supabase
       try {
-        const title = generateChatTitle(messages)
         const newConversation = await createConversation(user.id, title, selectedModel)
         if (newConversation) {
           // Save all messages to the new conversation
@@ -228,45 +265,52 @@ function AppContent() {
             await addMessage(newConversation.id, msg.role, msg.content)
           }
           
-          const newChat: Chat = {
-            id: newConversation.id,
-            title,
-            messages,
-            createdAt: new Date(newConversation.created_at)
-          }
-          setChats(prev => [newChat, ...prev])
+          // Replace temp chat with real one
+          setChats(prev => prev.map(c => 
+            c.id === tempId 
+              ? { ...c, id: newConversation.id }
+              : c
+          ))
           setCurrentChatId(newConversation.id)
+          currentChatIdRef.current = newConversation.id
         }
       } catch (error) {
-        console.error('Error creating chat with messages:', error)
+        console.error('Error persisting chat to database:', error)
+        // Messages are still visible in the UI from the temp chat
       }
     } else {
-      // Update existing chat
-      const existingChat = chats.find(c => c.id === currentChatId)
-      const existingMessageCount = existingChat?.messages.length || 0
-      
-      // Save new messages to Supabase
-      const newMessages = messages.slice(existingMessageCount)
-      for (const msg of newMessages) {
-        await addMessage(currentChatId, msg.role, msg.content)
-      }
-      
-      // Update title if it was "New Chat" and this is the first message
-      const newTitle = existingChat?.title === 'New Chat' ? generateChatTitle(messages) : existingChat?.title
-      if (newTitle !== existingChat?.title && newTitle) {
-        await updateConversationTitle(currentChatId, newTitle)
-      }
-      
-      setChats(prev => prev.map(chat => {
-        if (chat.id === currentChatId) {
-          return {
-            ...chat,
-            messages,
-            title: newTitle || chat.title
-          }
+      // Update existing chat - update UI state immediately
+      setChats(prev => {
+        const existingChat = prev.find(c => c.id === activeChatId)
+        const existingMessageCount = existingChat?.messages.length || 0
+        
+        // Save new messages to Supabase (fire and forget - don't block UI)
+        const newMsgs = messages.slice(existingMessageCount)
+        for (const msg of newMsgs) {
+          addMessage(activeChatId, msg.role, msg.content).catch(err => 
+            console.error('Error saving message to DB:', err)
+          )
         }
-        return chat
-      }))
+        
+        // Update title if it was "New Chat" and this is the first message
+        const newTitle = existingChat?.title === 'New Chat' ? generateChatTitle(messages) : existingChat?.title
+        if (newTitle !== existingChat?.title && newTitle) {
+          updateConversationTitle(activeChatId, newTitle).catch(err =>
+            console.error('Error updating title:', err)
+          )
+        }
+        
+        return prev.map(chat => {
+          if (chat.id === activeChatId) {
+            return {
+              ...chat,
+              messages,
+              title: newTitle || chat.title
+            }
+          }
+          return chat
+        })
+      })
     }
   }
 
@@ -286,6 +330,18 @@ function AppContent() {
     if (window.innerWidth <= 768) {
       setSidebarOpen(false)
     }
+  }
+
+  // Show loading screen while auth is initializing
+  // This is critical for OAuth callbacks - without this, the app would
+  // redirect to /login before Supabase can exchange the ?code= parameter
+  if (authLoading) {
+    return (
+      <div className="auth-loading-page">
+        <div className="loading-spinner"></div>
+        <p>Loading...</p>
+      </div>
+    )
   }
 
   // Don't show sidebar layout on auth pages
