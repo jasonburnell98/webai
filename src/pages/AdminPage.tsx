@@ -18,6 +18,7 @@ const ALL_MODELS = [
   { id: 'openai/gpt-4-turbo', name: 'GPT-4 Turbo', provider: 'OpenAI', tier: 'pro' },
   { id: 'openai/gpt-4', name: 'GPT-4', provider: 'OpenAI', tier: 'pro' },
   { id: 'openai/gpt-3.5-turbo', name: 'GPT-3.5 Turbo', provider: 'OpenAI', tier: 'free' },
+  { id: 'google/gemini-3-pro-image-preview', name: 'Nano Banana Pro (Gemini 3 Pro Image)', provider: 'Google', tier: 'pro' },
   { id: 'google/gemini-pro-1.5', name: 'Gemini Pro 1.5', provider: 'Google', tier: 'pro' },
   { id: 'google/gemini-flash-1.5', name: 'Gemini Flash 1.5', provider: 'Google', tier: 'free' },
   { id: 'meta-llama/llama-3.1-405b-instruct', name: 'Llama 3.1 405B', provider: 'Meta', tier: 'pro' },
