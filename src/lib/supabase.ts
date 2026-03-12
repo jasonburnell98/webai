@@ -4,34 +4,24 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.warn('Supabase credentials not found. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file')
+  console.warn(
+    'Supabase credentials not found. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file'
+  )
 }
 
-export const supabase = createClient(
-  supabaseUrl || '',
-  supabaseAnonKey || '',
-  {
-    auth: {
-      // Persist session in localStorage for longer sessions
-      persistSession: true,
-      // Use localStorage for better persistence across browser sessions
-      storage: localStorage,
-      // Unique storage key for this app
-      storageKey: 'open-router-ui-auth',
-      // Auto-refresh tokens before they expire
-      autoRefreshToken: true,
-      // Detect session from URL (for OAuth callbacks)
-      detectSessionInUrl: true,
-      // Flow type for PKCE
-      flowType: 'pkce',
-    },
-  }
-)
+// Single Supabase client using the anon key.
+// Auth is handled by Clerk — this client is used solely for database operations.
+// RLS is disabled on all tables (see supabase/schema.sql).  For production,
+// configure a Clerk JWT Template in Supabase and re-enable RLS policies.
+export const supabase = createClient(supabaseUrl || '', supabaseAnonKey || '')
 
-// Database types
+// =============================================
+// DATABASE TYPES
+// =============================================
+
 export interface UserProfile {
-  id: string
-  email: string
+  id: string                        // Clerk user ID (TEXT)
+  email: string | null
   tier: 'free' | 'pro'
   stripe_customer_id: string | null
   stripe_subscription_id: string | null
@@ -41,18 +31,9 @@ export interface UserProfile {
   updated_at: string
 }
 
-export interface UsageLog {
-  id: string
-  user_id: string
-  messages_count: number
-  date: string
-  created_at: string
-}
-
-// Chat types
 export interface Conversation {
   id: string
-  user_id: string
+  user_id: string                   // Clerk user ID (TEXT)
   title: string
   model_id: string | null
   created_at: string
@@ -71,7 +52,10 @@ export interface ConversationWithMessages extends Conversation {
   messages: Message[]
 }
 
-// Tier limits
+// =============================================
+// TIER CONFIGURATION
+// =============================================
+
 export const TIER_LIMITS = {
   free: {
     messagesPerDay: 10,
@@ -88,93 +72,129 @@ export const TIER_LIMITS = {
       'mistralai/mixtral-8x7b-instruct': 'Mixtral 8x7B',
       'google/gemini-flash-1.5': 'Gemini Flash 1.5',
       'openai/gpt-3.5-turbo': 'GPT-3.5 Turbo',
-    }
+    },
   },
   pro: {
     messagesPerDay: Infinity,
     models: 'all' as const,
-  }
+  },
 }
 
-// Check if a model is available for a tier
 export function isModelAvailable(modelId: string, tier: 'free' | 'pro'): boolean {
   if (tier === 'pro') return true
   return TIER_LIMITS.free.models.includes(modelId)
 }
 
-// Get remaining messages for today
+// =============================================
+// USER PROFILE OPERATIONS
+// =============================================
+
+/**
+ * Fetch the user's profile, creating it if it doesn't exist yet.
+ * Uses the Clerk user ID as the primary key.
+ */
+export async function upsertUserProfile(
+  userId: string,
+  email: string | null
+): Promise<UserProfile | null> {
+  // Try fetch first
+  const { data: existing, error: fetchError } = await supabase
+    .from('user_profiles')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle()
+
+  if (fetchError) {
+    console.error('Error fetching profile:', fetchError)
+  }
+
+  if (existing) {
+    return existing as UserProfile
+  }
+
+  // Profile doesn't exist — create it
+  const newProfile = {
+    id: userId,
+    email,
+    tier: 'free' as const,
+    messages_used_today: 0,
+    last_usage_reset: new Date().toISOString(),
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
+  const { data: created, error: insertError } = await supabase
+    .from('user_profiles')
+    .insert(newProfile)
+    .select()
+    .maybeSingle()
+
+  if (insertError) {
+    console.error('Error creating profile:', insertError)
+    return null
+  }
+
+  return created as UserProfile
+}
+
+// =============================================
+// USAGE TRACKING
+// =============================================
+
 export async function getRemainingMessages(userId: string): Promise<number> {
   const { data: profile, error } = await supabase
     .from('user_profiles')
     .select('tier, messages_used_today, last_usage_reset')
     .eq('id', userId)
-    .single()
+    .maybeSingle()
 
   if (error || !profile) return 0
-
   if (profile.tier === 'pro') return Infinity
 
-  // Check if we need to reset daily usage
+  // Reset counter if it's a new day
   const today = new Date().toISOString().split('T')[0]
   const lastReset = profile.last_usage_reset?.split('T')[0]
 
   if (lastReset !== today) {
-    // Reset the counter for new day
     await supabase
       .from('user_profiles')
-      .update({ 
-        messages_used_today: 0, 
-        last_usage_reset: new Date().toISOString() 
-      })
+      .update({ messages_used_today: 0, last_usage_reset: new Date().toISOString() })
       .eq('id', userId)
-    
     return TIER_LIMITS.free.messagesPerDay
   }
 
   return Math.max(0, TIER_LIMITS.free.messagesPerDay - profile.messages_used_today)
 }
 
-// Increment message usage
 export async function incrementMessageUsage(userId: string): Promise<boolean> {
   const remaining = await getRemainingMessages(userId)
-  
   if (remaining <= 0) return false
+
+  // Fetch current count then increment
+  const { data: profile } = await supabase
+    .from('user_profiles')
+    .select('messages_used_today')
+    .eq('id', userId)
+    .maybeSingle()
+
+  if (!profile) return false
 
   const { error } = await supabase
     .from('user_profiles')
-    .update({ 
-      messages_used_today: supabase.rpc('increment_messages'),
-      last_usage_reset: new Date().toISOString()
+    .update({
+      messages_used_today: (profile.messages_used_today || 0) + 1,
+      last_usage_reset: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     })
     .eq('id', userId)
 
-  if (error) {
-    // Fallback: direct increment
-    const { data: profile } = await supabase
-      .from('user_profiles')
-      .select('messages_used_today')
-      .eq('id', userId)
-      .single()
-
-    if (profile) {
-      await supabase
-        .from('user_profiles')
-        .update({ 
-          messages_used_today: (profile.messages_used_today || 0) + 1,
-          last_usage_reset: new Date().toISOString()
-        })
-        .eq('id', userId)
-    }
-  }
-
-  return true
+  return !error
 }
 
 // =============================================
-// CONVERSATION CRUD OPERATIONS
+// CONVERSATION CRUD
 // =============================================
 
-// Get all conversations for a user (ordered by most recent)
 export async function getConversations(userId: string): Promise<Conversation[]> {
   const { data, error } = await supabase
     .from('conversations')
@@ -186,17 +206,17 @@ export async function getConversations(userId: string): Promise<Conversation[]> 
     console.error('Error fetching conversations:', error)
     return []
   }
-
   return data || []
 }
 
-// Get a single conversation with all its messages
-export async function getConversationWithMessages(conversationId: string): Promise<ConversationWithMessages | null> {
+export async function getConversationWithMessages(
+  conversationId: string
+): Promise<ConversationWithMessages | null> {
   const { data: conversation, error: convError } = await supabase
     .from('conversations')
     .select('*')
     .eq('id', conversationId)
-    .single()
+    .maybeSingle()
 
   if (convError || !conversation) {
     console.error('Error fetching conversation:', convError)
@@ -217,33 +237,26 @@ export async function getConversationWithMessages(conversationId: string): Promi
   return { ...conversation, messages: messages || [] }
 }
 
-// Create a new conversation
 export async function createConversation(
-  userId: string, 
-  title: string = 'New Chat',
+  userId: string,
+  title = 'New Chat',
   modelId?: string
 ): Promise<Conversation | null> {
   const { data, error } = await supabase
     .from('conversations')
-    .insert({
-      user_id: userId,
-      title,
-      model_id: modelId || null,
-    })
+    .insert({ user_id: userId, title, model_id: modelId || null })
     .select()
-    .single()
+    .maybeSingle()
 
   if (error) {
     console.error('Error creating conversation:', error)
     return null
   }
-
   return data
 }
 
-// Update conversation title
 export async function updateConversationTitle(
-  conversationId: string, 
+  conversationId: string,
   title: string
 ): Promise<boolean> {
   const { error } = await supabase
@@ -255,30 +268,23 @@ export async function updateConversationTitle(
     console.error('Error updating conversation:', error)
     return false
   }
-
   return true
 }
 
-// Delete a conversation (messages are cascade deleted)
 export async function deleteConversation(conversationId: string): Promise<boolean> {
-  const { error } = await supabase
-    .from('conversations')
-    .delete()
-    .eq('id', conversationId)
+  const { error } = await supabase.from('conversations').delete().eq('id', conversationId)
 
   if (error) {
     console.error('Error deleting conversation:', error)
     return false
   }
-
   return true
 }
 
 // =============================================
-// MESSAGE CRUD OPERATIONS
+// MESSAGE CRUD
 // =============================================
 
-// Add a message to a conversation
 export async function addMessage(
   conversationId: string,
   role: 'user' | 'assistant' | 'system',
@@ -286,47 +292,36 @@ export async function addMessage(
 ): Promise<Message | null> {
   const { data, error } = await supabase
     .from('messages')
-    .insert({
-      conversation_id: conversationId,
-      role,
-      content,
-    })
+    .insert({ conversation_id: conversationId, role, content })
     .select()
-    .single()
+    .maybeSingle()
 
   if (error) {
     console.error('Error adding message:', error)
     return null
   }
-
   return data
 }
 
-// Add multiple messages at once (for batch saving)
 export async function addMessages(
   conversationId: string,
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>
 ): Promise<Message[]> {
-  const messagesToInsert = messages.map(msg => ({
+  const toInsert = messages.map((m) => ({
     conversation_id: conversationId,
-    role: msg.role,
-    content: msg.content,
+    role: m.role,
+    content: m.content,
   }))
 
-  const { data, error } = await supabase
-    .from('messages')
-    .insert(messagesToInsert)
-    .select()
+  const { data, error } = await supabase.from('messages').insert(toInsert).select()
 
   if (error) {
     console.error('Error adding messages:', error)
     return []
   }
-
   return data || []
 }
 
-// Get messages for a conversation
 export async function getMessages(conversationId: string): Promise<Message[]> {
   const { data, error } = await supabase
     .from('messages')
@@ -338,6 +333,5 @@ export async function getMessages(conversationId: string): Promise<Message[]> {
     console.error('Error fetching messages:', error)
     return []
   }
-
   return data || []
 }

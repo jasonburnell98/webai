@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { BrowserRouter as Router, Routes, Route, useNavigate, Navigate } from 'react-router-dom'
+import { ClerkProvider } from '@clerk/react'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Sidebar from './components/Sidebar'
 import UsageIndicator from './components/UsageIndicator'
@@ -18,6 +19,19 @@ import {
   type Message as DbMessage,
 } from './lib/supabase'
 import './App.css'
+
+const CLERK_PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
+
+if (!CLERK_PUBLISHABLE_KEY) {
+  console.error(
+    'Missing VITE_CLERK_PUBLISHABLE_KEY. Add it to your .env file. ' +
+      'Get one at https://dashboard.clerk.com'
+  )
+}
+
+// -------------------------------------------------------
+// Types
+// -------------------------------------------------------
 
 interface Attachment {
   type: 'image'
@@ -45,7 +59,26 @@ interface Chat {
   createdAt: Date
 }
 
-// Public route - redirects to home if already logged in
+// -------------------------------------------------------
+// ClerkProvider wired up to React Router's navigate
+// Must be rendered inside <Router> so useNavigate is available
+// -------------------------------------------------------
+function ClerkProviderWithRouter({ children }: { children: React.ReactNode }) {
+  const navigate = useNavigate()
+  return (
+    <ClerkProvider
+      publishableKey={CLERK_PUBLISHABLE_KEY}
+      routerPush={(to) => navigate(to)}
+      routerReplace={(to) => navigate(to, { replace: true })}
+    >
+      {children}
+    </ClerkProvider>
+  )
+}
+
+// -------------------------------------------------------
+// Public route – redirects authenticated users away from /login and /signup
+// -------------------------------------------------------
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
 
@@ -65,10 +98,14 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+// -------------------------------------------------------
+// Main app content (rendered when auth state is resolved)
+// -------------------------------------------------------
 function AppContent() {
   const navigate = useNavigate()
-  const { user, session, loading: authLoading, signOut, tier, canUseModel, remainingMessages, consumeMessage } = useAuth()
-  
+  const { user, loading: authLoading, signOut, tier, canUseModel, remainingMessages, consumeMessage } =
+    useAuth()
+
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('aiweb_theme')
     return (saved as 'light' | 'dark') || 'dark'
@@ -79,15 +116,14 @@ function AppContent() {
   const currentChatIdRef = useRef<string | null>(null)
   const [chatsLoading, setChatsLoading] = useState(true)
   const [apiKey] = useState(() => localStorage.getItem('aiweb_api_key') || '')
-  const [selectedModel, setSelectedModel] = useState(() => 
-    localStorage.getItem('aiweb_model') || 'meta-llama/llama-3.1-70b-instruct'
+  const [selectedModel, setSelectedModel] = useState(
+    () => localStorage.getItem('aiweb_model') || 'meta-llama/llama-3.1-70b-instruct'
   )
-  const [sidebarOpen, setSidebarOpen] = useState(() => {
-    // Start with sidebar closed on mobile
-    return window.innerWidth > 768
-  })
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 768)
 
-  // Load chats from Supabase when user logs in
+  // ------------------------------------------------------------------
+  // Load conversations from Supabase once we know the user
+  // ------------------------------------------------------------------
   const loadChats = useCallback(async () => {
     if (!user) {
       setChats([])
@@ -99,18 +135,15 @@ function AppContent() {
     setChatsLoading(true)
     try {
       const conversations = await getConversations(user.id)
-      
-      // Convert Supabase conversations to local Chat format
       const loadedChats: Chat[] = conversations.map((conv: Conversation) => ({
         id: conv.id,
         title: conv.title,
-        messages: [], // Messages will be loaded on demand
-        createdAt: new Date(conv.created_at)
+        messages: [],
+        createdAt: new Date(conv.created_at),
       }))
-      
+
       setChats(loadedChats)
-      
-      // Select the most recent chat if one exists and none is selected
+
       if (loadedChats.length > 0 && !currentChatId) {
         setCurrentChatId(loadedChats[0].id)
       }
@@ -124,45 +157,37 @@ function AppContent() {
   // Load messages for the current chat
   const loadCurrentChatMessages = useCallback(async () => {
     if (!currentChatId || !user) return
-
     try {
       const conversation = await getConversationWithMessages(currentChatId)
       if (conversation) {
         const messages: Message[] = conversation.messages.map((msg: DbMessage) => ({
           role: msg.role as 'user' | 'assistant',
-          content: msg.content
+          content: msg.content,
         }))
-        
-        setChats(prev => prev.map(chat => 
-          chat.id === currentChatId 
-            ? { ...chat, messages, title: conversation.title }
-            : chat
-        ))
+        setChats((prev) =>
+          prev.map((chat) =>
+            chat.id === currentChatId ? { ...chat, messages, title: conversation.title } : chat
+          )
+        )
       }
     } catch (error) {
       console.error('Error loading messages:', error)
     }
   }, [currentChatId, user])
 
-  // Load chats when auth is fully initialized and session is available
-  // Must wait for authLoading to be false to ensure Supabase client has proper session
+  // Load chats once auth resolves and user is present
   useEffect(() => {
-    // Don't do anything while auth is still loading
-    if (authLoading) {
-      return
-    }
-    
-    if (session?.access_token && user) {
+    if (authLoading) return
+    if (user) {
       loadChats()
-    } else if (!user) {
-      // No user, clear chats
+    } else {
       setChats([])
       setCurrentChatId(null)
       setChatsLoading(false)
     }
-  }, [authLoading, user?.id, session?.access_token]) // Re-run when auth loading completes or user/session changes
+  }, [authLoading, user?.id])
 
-  // Keep the ref in sync with state
+  // Keep ref in sync with state
   useEffect(() => {
     currentChatIdRef.current = currentChatId
   }, [currentChatId])
@@ -172,7 +197,7 @@ function AppContent() {
     if (currentChatId && !currentChatId.startsWith('temp-')) {
       loadCurrentChatMessages()
     }
-  }, [currentChatId]) // Only re-run when currentChatId changes
+  }, [currentChatId])
 
   // Apply theme to document
   useEffect(() => {
@@ -180,33 +205,30 @@ function AppContent() {
     localStorage.setItem('aiweb_theme', theme)
   }, [theme])
 
-  const toggleTheme = () => {
-    setTheme(prev => prev === 'dark' ? 'light' : 'dark')
-  }
+  const toggleTheme = () => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))
 
-  const currentChat = chats.find(c => c.id === currentChatId)
+  const currentChat = chats.find((c) => c.id === currentChatId)
   const currentMessages = currentChat?.messages || []
 
   const generateChatTitle = (messages: Message[]): string => {
     if (messages.length === 0) return 'New Chat'
-    const firstMessage = messages[0].content
-    return firstMessage.length > 30 ? firstMessage.substring(0, 30) + '...' : firstMessage
+    const first = messages[0].content
+    return first.length > 30 ? first.substring(0, 30) + '...' : first
   }
 
   const createNewChat = async () => {
     if (!user) return
-    
     try {
-      const newConversation = await createConversation(user.id, 'New Chat', selectedModel)
-      if (newConversation) {
+      const newConv = await createConversation(user.id, 'New Chat', selectedModel)
+      if (newConv) {
         const newChat: Chat = {
-          id: newConversation.id,
-          title: newConversation.title,
+          id: newConv.id,
+          title: newConv.title,
           messages: [],
-          createdAt: new Date(newConversation.created_at)
+          createdAt: new Date(newConv.created_at),
         }
-        setChats(prev => [newChat, ...prev])
-        setCurrentChatId(newConversation.id)
+        setChats((prev) => [newChat, ...prev])
+        setCurrentChatId(newConv.id)
       }
     } catch (error) {
       console.error('Error creating new chat:', error)
@@ -223,9 +245,9 @@ function AppContent() {
     try {
       const success = await deleteConversationFromDb(id)
       if (success) {
-        setChats(prev => prev.filter(c => c.id !== id))
+        setChats((prev) => prev.filter((c) => c.id !== id))
         if (currentChatId === id) {
-          const remaining = chats.filter(c => c.id !== id)
+          const remaining = chats.filter((c) => c.id !== id)
           setCurrentChatId(remaining.length > 0 ? remaining[0].id : null)
         }
       }
@@ -237,79 +259,57 @@ function AppContent() {
   const updateMessages = async (messages: Message[]) => {
     if (!user) return
 
-    // Use ref to always get the latest currentChatId, even in stale closures
     const activeChatId = currentChatIdRef.current
 
     if (!activeChatId) {
-      // Create new chat if none exists
       const title = generateChatTitle(messages)
-      
-      // Create a temporary local chat immediately so messages display right away
       const tempId = 'temp-' + Date.now()
-      const tempChat: Chat = {
-        id: tempId,
-        title,
-        messages,
-        createdAt: new Date()
-      }
-      setChats(prev => [tempChat, ...prev])
+      const tempChat: Chat = { id: tempId, title, messages, createdAt: new Date() }
+      setChats((prev) => [tempChat, ...prev])
       setCurrentChatId(tempId)
       currentChatIdRef.current = tempId
 
-      // Then try to persist to Supabase
       try {
-        const newConversation = await createConversation(user.id, title, selectedModel)
-        if (newConversation) {
-          // Save all messages to the new conversation
+        const newConv = await createConversation(user.id, title, selectedModel)
+        if (newConv) {
           for (const msg of messages) {
-            await addMessage(newConversation.id, msg.role, msg.content)
+            await addMessage(newConv.id, msg.role, msg.content)
           }
-          
-          // Replace temp chat with real one
-          setChats(prev => prev.map(c => 
-            c.id === tempId 
-              ? { ...c, id: newConversation.id }
-              : c
-          ))
-          setCurrentChatId(newConversation.id)
-          currentChatIdRef.current = newConversation.id
+          setChats((prev) =>
+            prev.map((c) => (c.id === tempId ? { ...c, id: newConv.id } : c))
+          )
+          setCurrentChatId(newConv.id)
+          currentChatIdRef.current = newConv.id
         }
       } catch (error) {
-        console.error('Error persisting chat to database:', error)
-        // Messages are still visible in the UI from the temp chat
+        console.error('Error persisting chat:', error)
       }
     } else {
-      // Update existing chat - update UI state immediately
-      setChats(prev => {
-        const existingChat = prev.find(c => c.id === activeChatId)
-        const existingMessageCount = existingChat?.messages.length || 0
-        
-        // Save new messages to Supabase (fire and forget - don't block UI)
-        const newMsgs = messages.slice(existingMessageCount)
+      setChats((prev) => {
+        const existing = prev.find((c) => c.id === activeChatId)
+        const existingCount = existing?.messages.length || 0
+
+        // Persist new messages to Supabase in the background
+        const newMsgs = messages.slice(existingCount)
         for (const msg of newMsgs) {
-          addMessage(activeChatId, msg.role, msg.content).catch(err => 
-            console.error('Error saving message to DB:', err)
+          addMessage(activeChatId, msg.role, msg.content).catch((err) =>
+            console.error('Error saving message:', err)
           )
         }
-        
-        // Update title if it was "New Chat" and this is the first message
-        const newTitle = existingChat?.title === 'New Chat' ? generateChatTitle(messages) : existingChat?.title
-        if (newTitle !== existingChat?.title && newTitle) {
-          updateConversationTitle(activeChatId, newTitle).catch(err =>
+
+        const newTitle =
+          existing?.title === 'New Chat' ? generateChatTitle(messages) : existing?.title
+        if (newTitle !== existing?.title && newTitle) {
+          updateConversationTitle(activeChatId, newTitle).catch((err) =>
             console.error('Error updating title:', err)
           )
         }
-        
-        return prev.map(chat => {
-          if (chat.id === activeChatId) {
-            return {
-              ...chat,
-              messages,
-              title: newTitle || chat.title
-            }
-          }
-          return chat
-        })
+
+        return prev.map((chat) =>
+          chat.id === activeChatId
+            ? { ...chat, messages, title: newTitle || chat.title }
+            : chat
+        )
       })
     }
   }
@@ -318,23 +318,17 @@ function AppContent() {
     try {
       await signOut()
     } catch (error) {
-      // Ignore AbortError that can occur during sign out
       if (error instanceof Error && error.name !== 'AbortError') {
         console.error('Sign out error:', error)
       }
     }
-    // Navigate happens automatically via the isAuthPage check when user becomes null
   }
 
   const handleSidebarClose = () => {
-    if (window.innerWidth <= 768) {
-      setSidebarOpen(false)
-    }
+    if (window.innerWidth <= 768) setSidebarOpen(false)
   }
 
-  // Show loading screen while auth is initializing
-  // This is critical for OAuth callbacks - without this, the app would
-  // redirect to /login before Supabase can exchange the ?code= parameter
+  // Show loading screen while Clerk (and profile) are initializing
   if (authLoading) {
     return (
       <div className="auth-loading-page">
@@ -344,28 +338,26 @@ function AppContent() {
     )
   }
 
-  // Don't show sidebar layout on auth pages
-  const isAuthPage = !user
-
-  if (isAuthPage) {
+  // Not signed in → show auth routes only
+  if (!user) {
     return (
       <div className="auth-layout">
         <Routes>
-          <Route 
-            path="/login" 
+          <Route
+            path="/login/*"
             element={
               <PublicRoute>
                 <AuthPage mode="login" />
               </PublicRoute>
-            } 
+            }
           />
-          <Route 
-            path="/signup" 
+          <Route
+            path="/signup/*"
             element={
               <PublicRoute>
                 <AuthPage mode="signup" />
               </PublicRoute>
-            } 
+            }
           />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
@@ -373,12 +365,12 @@ function AppContent() {
     )
   }
 
+  // Signed in → full app
   return (
     <div className={`app-layout ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
-      {/* Mobile overlay */}
       {sidebarOpen && (
-        <div 
-          className="sidebar-overlay" 
+        <div
+          className="sidebar-overlay"
           onClick={() => setSidebarOpen(false)}
           aria-hidden="true"
         />
@@ -400,10 +392,10 @@ function AppContent() {
         onClose={() => setSidebarOpen(false)}
         isLoading={chatsLoading}
       />
-      
+
       <main className="main-content">
         <header className="header">
-          <button 
+          <button
             className="menu-toggle"
             onClick={() => setSidebarOpen(!sidebarOpen)}
             title={sidebarOpen ? 'Close menu' : 'Open menu'}
@@ -412,12 +404,15 @@ function AppContent() {
           </button>
           <h1>aiWeb</h1>
           <div className="header-actions">
-            <span className={`model-badge ${!canUseModel(selectedModel) ? 'locked' : ''}`} title="Current model">
+            <span
+              className={`model-badge ${!canUseModel(selectedModel) ? 'locked' : ''}`}
+              title="Current model"
+            >
               {!canUseModel(selectedModel) && '🔒 '}
               {selectedModel.split('/').pop()}
             </span>
             <div className="user-menu">
-              <span className="user-email">{user.email}</span>
+              <span className="user-email">{user.email ?? 'User'}</span>
               <button onClick={handleSignOut} className="sign-out-btn" title="Sign out">
                 Sign Out
               </button>
@@ -428,10 +423,10 @@ function AppContent() {
         <UsageIndicator />
 
         <Routes>
-          <Route 
-            path="/" 
+          <Route
+            path="/"
             element={
-              <ChatPage 
+              <ChatPage
                 messages={currentMessages}
                 onMessagesUpdate={updateMessages}
                 apiKey={apiKey}
@@ -442,25 +437,20 @@ function AppContent() {
                 consumeMessage={consumeMessage}
                 tier={tier}
               />
-            } 
+            }
           />
-          <Route 
-            path="/admin" 
+          <Route
+            path="/admin"
             element={
-              <AdminPage 
+              <AdminPage
                 selectedModel={selectedModel}
                 onModelChange={setSelectedModel}
                 canUseModel={canUseModel}
                 tier={tier}
               />
-            } 
+            }
           />
-          <Route 
-            path="/pricing" 
-            element={
-              <PricingPage />
-            } 
-          />
+          <Route path="/pricing" element={<PricingPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
@@ -468,12 +458,17 @@ function AppContent() {
   )
 }
 
+// -------------------------------------------------------
+// Root app – Router → ClerkProvider → AuthProvider → content
+// -------------------------------------------------------
 function App() {
   return (
     <Router>
-      <AuthProvider>
-        <AppContent />
-      </AuthProvider>
+      <ClerkProviderWithRouter>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </ClerkProviderWithRouter>
     </Router>
   )
 }
