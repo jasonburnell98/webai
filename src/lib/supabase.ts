@@ -166,6 +166,26 @@ export async function getRemainingMessages(userId: string): Promise<number> {
   return Math.max(0, TIER_LIMITS.free.messagesPerDay - profile.messages_used_today)
 }
 
+/**
+ * Update a user's tier in Supabase (called when Clerk metadata or admin email
+ * indicates a different tier than what's stored in the DB).
+ */
+export async function updateUserTier(
+  userId: string,
+  newTier: 'free' | 'pro'
+): Promise<boolean> {
+  const { error } = await supabase
+    .from('user_profiles')
+    .update({ tier: newTier, updated_at: new Date().toISOString() })
+    .eq('id', userId)
+
+  if (error) {
+    console.error('Error updating user tier:', error)
+    return false
+  }
+  return true
+}
+
 export async function incrementMessageUsage(userId: string): Promise<boolean> {
   const remaining = await getRemainingMessages(userId)
   if (remaining <= 0) return false
