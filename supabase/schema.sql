@@ -60,6 +60,7 @@ CREATE TABLE conversations (
   user_id TEXT NOT NULL,            -- Clerk user ID
   title TEXT NOT NULL DEFAULT 'New Chat',
   model_id TEXT,
+  is_saved BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -101,6 +102,14 @@ CREATE INDEX idx_usage_logs_user ON usage_logs(user_id);
 CREATE INDEX idx_usage_logs_date ON usage_logs(created_at);
 
 ALTER TABLE usage_logs DISABLE ROW LEVEL SECURITY;
+
+
+-- =============================================
+-- MIGRATION: Add is_saved to existing conversations table
+-- (Only run this if you already have the conversations table and
+--  do NOT want to drop and recreate it from the schema above)
+-- =============================================
+-- ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_saved BOOLEAN NOT NULL DEFAULT FALSE;
 
 
 -- =============================================

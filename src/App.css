@@ -181,6 +181,32 @@
   white-space: nowrap;
 }
 
+.save-chat-btn {
+  background: transparent;
+  border: none;
+  padding: 0.5rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.chat-item:hover .save-chat-btn {
+  opacity: 1;
+}
+
+.save-chat-btn.saved {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.save-chat-btn:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
 .delete-chat-btn {
   background: transparent;
   border: none;
@@ -199,6 +225,33 @@
 .delete-chat-btn:hover {
   opacity: 1;
   color: var(--error);
+}
+
+/* Chat list sections (Saved / Recent) */
+.chat-list-section {
+  margin-bottom: 1rem;
+}
+
+.chat-list-section h3 {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 0.5rem 0;
+  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0 0.25rem;
+}
+
+.section-icon {
+  font-size: 0.85rem;
+}
+
+.chat-list-section ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
 }
 
 /* Main Content */

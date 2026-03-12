@@ -14,6 +14,7 @@ import {
   createConversation,
   updateConversationTitle,
   deleteConversation as deleteConversationFromDb,
+  toggleSaveConversation,
   addMessage,
   type Conversation,
   type Message as DbMessage,
@@ -56,6 +57,7 @@ interface Chat {
   id: string
   title: string
   messages: Message[]
+  isSaved: boolean
   createdAt: Date
 }
 
@@ -139,6 +141,7 @@ function AppContent() {
         id: conv.id,
         title: conv.title,
         messages: [],
+        isSaved: conv.is_saved ?? false,
         createdAt: new Date(conv.created_at),
       }))
 
@@ -225,6 +228,7 @@ function AppContent() {
           id: newConv.id,
           title: newConv.title,
           messages: [],
+          isSaved: false,
           createdAt: new Date(newConv.created_at),
         }
         setChats((prev) => [newChat, ...prev])
@@ -239,6 +243,17 @@ function AppContent() {
   const selectChat = (id: string) => {
     setCurrentChatId(id)
     navigate('/')
+  }
+
+  const toggleSaveChat = async (id: string) => {
+    const chat = chats.find((c) => c.id === id)
+    if (!chat || id.startsWith('temp-')) return
+    const newValue = await toggleSaveConversation(id, chat.isSaved)
+    if (newValue !== null) {
+      setChats((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, isSaved: newValue } : c))
+      )
+    }
   }
 
   const deleteChat = async (id: string) => {
@@ -264,7 +279,7 @@ function AppContent() {
     if (!activeChatId) {
       const title = generateChatTitle(messages)
       const tempId = 'temp-' + Date.now()
-      const tempChat: Chat = { id: tempId, title, messages, createdAt: new Date() }
+      const tempChat: Chat = { id: tempId, title, messages, isSaved: false, createdAt: new Date() }
       setChats((prev) => [tempChat, ...prev])
       setCurrentChatId(tempId)
       currentChatIdRef.current = tempId
@@ -276,7 +291,7 @@ function AppContent() {
             await addMessage(newConv.id, msg.role, msg.content)
           }
           setChats((prev) =>
-            prev.map((c) => (c.id === tempId ? { ...c, id: newConv.id } : c))
+            prev.map((c) => (c.id === tempId ? { ...c, id: newConv.id, isSaved: false } : c))
           )
           setCurrentChatId(newConv.id)
           currentChatIdRef.current = newConv.id
@@ -386,6 +401,7 @@ function AppContent() {
           selectChat(id)
           handleSidebarClose()
         }}
+        onToggleSaveChat={toggleSaveChat}
         onDeleteChat={deleteChat}
         theme={theme}
         onToggleTheme={toggleTheme}

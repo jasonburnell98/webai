@@ -36,6 +36,7 @@ export interface Conversation {
   user_id: string                   // Clerk user ID (TEXT)
   title: string
   model_id: string | null
+  is_saved: boolean
   created_at: string
   updated_at: string
 }
@@ -299,6 +300,27 @@ export async function deleteConversation(conversationId: string): Promise<boolea
     return false
   }
   return true
+}
+
+/**
+ * Toggle the saved/bookmarked state of a conversation.
+ * Returns the new is_saved value, or null on error.
+ */
+export async function toggleSaveConversation(
+  conversationId: string,
+  currentlySaved: boolean
+): Promise<boolean | null> {
+  const newValue = !currentlySaved
+  const { error } = await supabase
+    .from('conversations')
+    .update({ is_saved: newValue, updated_at: new Date().toISOString() })
+    .eq('id', conversationId)
+
+  if (error) {
+    console.error('Error toggling save state:', error)
+    return null
+  }
+  return newValue
 }
 
 // =============================================
