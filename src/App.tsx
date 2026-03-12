@@ -62,6 +62,45 @@ interface Chat {
 }
 
 // -------------------------------------------------------
+// localStorage helpers – primary persistence layer
+// -------------------------------------------------------
+
+interface StoredChat {
+  id: string
+  title: string
+  messages: Message[]
+  isSaved: boolean
+  createdAt: string // ISO string
+}
+
+function storageKey(userId: string) {
+  return `aiweb_chats_${userId}`
+}
+
+function loadChatsFromStorage(userId: string): Chat[] {
+  try {
+    const raw = localStorage.getItem(storageKey(userId))
+    if (!raw) return []
+    const parsed: StoredChat[] = JSON.parse(raw)
+    return parsed.map((c) => ({ ...c, createdAt: new Date(c.createdAt) }))
+  } catch {
+    return []
+  }
+}
+
+function saveChatsToStorage(userId: string, chats: Chat[]) {
+  try {
+    const toStore: StoredChat[] = chats.map((c) => ({
+      ...c,
+      createdAt: c.createdAt.toISOString(),
+    }))
+    localStorage.setItem(storageKey(userId), JSON.stringify(toStore))
+  } catch (err) {
+    console.error('[aiWeb] Error saving chats to localStorage:', err)
+  }
+}
+
+// -------------------------------------------------------
 // ClerkProvider wired up to React Router's navigate
 // Must be rendered inside <Router> so useNavigate is available
 // -------------------------------------------------------
@@ -124,7 +163,16 @@ function AppContent() {
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 768)
 
   // ------------------------------------------------------------------
-  // Load conversations from Supabase once we know the user
+  // Persist chats to localStorage whenever they change
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (user && !chatsLoading) {
+      saveChatsToStorage(user.id, chats)
+    }
+  }, [chats, user, chatsLoading])
+
+  // ------------------------------------------------------------------
+  // Load conversations – localStorage first (instant), then Supabase sync
   // ------------------------------------------------------------------
   const loadChats = useCallback(async () => {
     if (!user) {
@@ -135,34 +183,56 @@ function AppContent() {
     }
 
     setChatsLoading(true)
+
+    // ① Load from localStorage immediately so the UI is responsive right away
+    const localChats = loadChatsFromStorage(user.id)
+    if (localChats.length > 0) {
+      setChats(localChats)
+      setCurrentChatId((prev) => prev ?? localChats[0].id)
+    }
+
+    // ② Try to sync with Supabase in the background
     try {
       const conversations = await getConversations(user.id)
-      const loadedChats: Chat[] = conversations.map((conv: Conversation) => ({
-        id: conv.id,
-        title: conv.title,
-        messages: [],
-        isSaved: conv.is_saved ?? false,
-        createdAt: new Date(conv.created_at),
-      }))
+      if (conversations.length > 0) {
+        // Merge: use Supabase metadata, keep locally-cached messages
+        const merged: Chat[] = conversations.map((conv: Conversation) => {
+          const local = localChats.find((c) => c.id === conv.id)
+          return {
+            id: conv.id,
+            title: conv.title,
+            messages: local?.messages ?? [],
+            isSaved: conv.is_saved ?? false,
+            createdAt: new Date(conv.created_at),
+          }
+        })
 
-      setChats(loadedChats)
+        // Also keep any locally-created chats that aren't in Supabase yet
+        // (temp IDs that start with 'local-')
+        const unseenLocal = localChats.filter(
+          (lc) => lc.id.startsWith('local-') && !merged.find((m) => m.id === lc.id)
+        )
 
-      if (loadedChats.length > 0 && !currentChatId) {
-        setCurrentChatId(loadedChats[0].id)
+        const finalChats = [...unseenLocal, ...merged]
+        setChats(finalChats)
+        setCurrentChatId((prev) => prev ?? finalChats[0]?.id ?? null)
       }
     } catch (error) {
-      console.error('Error loading chats:', error)
+      console.error('[aiWeb] Supabase unavailable – using localStorage chats:', error)
+      // Keep the local chats that were already set above
     } finally {
       setChatsLoading(false)
     }
-  }, [user, currentChatId])
+  }, [user])
 
-  // Load messages for the current chat
+  // Load messages for the current chat from Supabase (best-effort)
   const loadCurrentChatMessages = useCallback(async () => {
     if (!currentChatId || !user) return
+    if (currentChatId.startsWith('local-')) return // local-only chat, no DB record
+
     try {
       const conversation = await getConversationWithMessages(currentChatId)
-      if (conversation) {
+      if (conversation && conversation.messages.length > 0) {
         const messages: Message[] = conversation.messages.map((msg: DbMessage) => ({
           role: msg.role as 'user' | 'assistant',
           content: msg.content,
@@ -174,7 +244,7 @@ function AppContent() {
         )
       }
     } catch (error) {
-      console.error('Error loading messages:', error)
+      console.error('[aiWeb] Could not load messages from Supabase – using cached:', error)
     }
   }, [currentChatId, user])
 
@@ -195,9 +265,9 @@ function AppContent() {
     currentChatIdRef.current = currentChatId
   }, [currentChatId])
 
-  // Load messages when current chat changes (skip temp chats)
+  // Load messages when current chat changes (skip temp/local chats)
   useEffect(() => {
-    if (currentChatId && !currentChatId.startsWith('temp-')) {
+    if (currentChatId && !currentChatId.startsWith('local-') && !currentChatId.startsWith('temp-')) {
       loadCurrentChatMessages()
     }
   }, [currentChatId])
@@ -219,25 +289,47 @@ function AppContent() {
     return first.length > 30 ? first.substring(0, 30) + '...' : first
   }
 
+  // ------------------------------------------------------------------
+  // Create a new chat – local-first, then sync to Supabase
+  // ------------------------------------------------------------------
   const createNewChat = async () => {
     if (!user) return
+
+    // Create a local chat immediately so the UI responds instantly
+    const localId = 'local-' + crypto.randomUUID()
+    const newChat: Chat = {
+      id: localId,
+      title: 'New Chat',
+      messages: [],
+      isSaved: false,
+      createdAt: new Date(),
+    }
+    setChats((prev) => [newChat, ...prev])
+    setCurrentChatId(localId)
+    currentChatIdRef.current = localId
+    navigate('/')
+
+    // Background: persist to Supabase and replace temp ID with real one
     try {
       const newConv = await createConversation(user.id, 'New Chat', selectedModel)
       if (newConv) {
-        const newChat: Chat = {
-          id: newConv.id,
-          title: newConv.title,
-          messages: [],
-          isSaved: false,
-          createdAt: new Date(newConv.created_at),
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === localId
+              ? { ...c, id: newConv.id, createdAt: new Date(newConv.created_at) }
+              : c
+          )
+        )
+        // Only update the active chat pointer if we're still on that chat
+        if (currentChatIdRef.current === localId) {
+          setCurrentChatId(newConv.id)
+          currentChatIdRef.current = newConv.id
         }
-        setChats((prev) => [newChat, ...prev])
-        setCurrentChatId(newConv.id)
       }
     } catch (error) {
-      console.error('Error creating new chat:', error)
+      console.error('[aiWeb] Could not persist new chat to Supabase:', error)
+      // Chat already exists locally – that's fine
     }
-    navigate('/')
   }
 
   const selectChat = (id: string) => {
@@ -247,43 +339,58 @@ function AppContent() {
 
   const toggleSaveChat = async (id: string) => {
     const chat = chats.find((c) => c.id === id)
-    if (!chat || id.startsWith('temp-')) return
-    const newValue = await toggleSaveConversation(id, chat.isSaved)
-    if (newValue !== null) {
-      setChats((prev) =>
-        prev.map((c) => (c.id === id ? { ...c, isSaved: newValue } : c))
-      )
+    if (!chat) return
+
+    // Optimistically update local state
+    const newValue = !chat.isSaved
+    setChats((prev) => prev.map((c) => (c.id === id ? { ...c, isSaved: newValue } : c)))
+
+    // Sync to Supabase (best-effort, skip local-only chats)
+    if (!id.startsWith('local-')) {
+      const result = await toggleSaveConversation(id, chat.isSaved)
+      if (result === null) {
+        // Revert on failure
+        setChats((prev) => prev.map((c) => (c.id === id ? { ...c, isSaved: chat.isSaved } : c)))
+      }
     }
   }
 
   const deleteChat = async (id: string) => {
-    try {
-      const success = await deleteConversationFromDb(id)
-      if (success) {
-        setChats((prev) => prev.filter((c) => c.id !== id))
-        if (currentChatId === id) {
-          const remaining = chats.filter((c) => c.id !== id)
-          setCurrentChatId(remaining.length > 0 ? remaining[0].id : null)
-        }
+    setChats((prev) => prev.filter((c) => c.id !== id))
+    if (currentChatId === id) {
+      const remaining = chats.filter((c) => c.id !== id)
+      setCurrentChatId(remaining.length > 0 ? remaining[0].id : null)
+    }
+
+    // Sync deletion to Supabase (best-effort)
+    if (!id.startsWith('local-')) {
+      try {
+        await deleteConversationFromDb(id)
+      } catch (error) {
+        console.error('[aiWeb] Error deleting from Supabase:', error)
       }
-    } catch (error) {
-      console.error('Error deleting chat:', error)
     }
   }
 
+  // ------------------------------------------------------------------
+  // Update messages – save to localStorage immediately, sync to Supabase
+  // ------------------------------------------------------------------
   const updateMessages = async (messages: Message[]) => {
     if (!user) return
 
     const activeChatId = currentChatIdRef.current
 
     if (!activeChatId) {
+      // No active chat – create one locally right away
       const title = generateChatTitle(messages)
-      const tempId = 'temp-' + Date.now()
-      const tempChat: Chat = { id: tempId, title, messages, isSaved: false, createdAt: new Date() }
-      setChats((prev) => [tempChat, ...prev])
-      setCurrentChatId(tempId)
-      currentChatIdRef.current = tempId
+      const localId = 'local-' + crypto.randomUUID()
+      const tempChat: Chat = { id: localId, title, messages, isSaved: false, createdAt: new Date() }
 
+      setChats((prev) => [tempChat, ...prev])
+      setCurrentChatId(localId)
+      currentChatIdRef.current = localId
+
+      // Background: persist to Supabase
       try {
         const newConv = await createConversation(user.id, title, selectedModel)
         if (newConv) {
@@ -291,33 +398,37 @@ function AppContent() {
             await addMessage(newConv.id, msg.role, msg.content)
           }
           setChats((prev) =>
-            prev.map((c) => (c.id === tempId ? { ...c, id: newConv.id, isSaved: false } : c))
+            prev.map((c) => (c.id === localId ? { ...c, id: newConv.id } : c))
           )
-          setCurrentChatId(newConv.id)
-          currentChatIdRef.current = newConv.id
+          if (currentChatIdRef.current === localId) {
+            setCurrentChatId(newConv.id)
+            currentChatIdRef.current = newConv.id
+          }
         }
       } catch (error) {
-        console.error('Error persisting chat:', error)
+        console.error('[aiWeb] Error persisting chat to Supabase:', error)
       }
     } else {
+      // Update existing chat – local state first
       setChats((prev) => {
         const existing = prev.find((c) => c.id === activeChatId)
         const existingCount = existing?.messages.length || 0
-
-        // Persist new messages to Supabase in the background
         const newMsgs = messages.slice(existingCount)
-        for (const msg of newMsgs) {
-          addMessage(activeChatId, msg.role, msg.content).catch((err) =>
-            console.error('Error saving message:', err)
-          )
-        }
-
         const newTitle =
           existing?.title === 'New Chat' ? generateChatTitle(messages) : existing?.title
-        if (newTitle !== existing?.title && newTitle) {
-          updateConversationTitle(activeChatId, newTitle).catch((err) =>
-            console.error('Error updating title:', err)
-          )
+
+        // Background: persist new messages to Supabase (real IDs only)
+        if (!activeChatId.startsWith('local-') && newMsgs.length > 0) {
+          for (const msg of newMsgs) {
+            addMessage(activeChatId, msg.role, msg.content).catch((err) =>
+              console.error('[aiWeb] Error saving message to Supabase:', err)
+            )
+          }
+          if (newTitle && newTitle !== existing?.title) {
+            updateConversationTitle(activeChatId, newTitle).catch((err) =>
+              console.error('[aiWeb] Error updating title in Supabase:', err)
+            )
+          }
         }
 
         return prev.map((chat) =>
