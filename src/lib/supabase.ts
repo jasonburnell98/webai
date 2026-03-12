@@ -65,6 +65,7 @@ export const TIER_LIMITS = {
       'meta-llama/llama-3.1-8b-instruct',
       'mistralai/mixtral-8x7b-instruct',
       'google/gemini-flash-1.5',
+      'openai/gpt-4o-mini',
       'openai/gpt-3.5-turbo',
     ],
     modelNames: {
@@ -72,6 +73,7 @@ export const TIER_LIMITS = {
       'meta-llama/llama-3.1-8b-instruct': 'Llama 3.1 8B',
       'mistralai/mixtral-8x7b-instruct': 'Mixtral 8x7B',
       'google/gemini-flash-1.5': 'Gemini Flash 1.5',
+      'openai/gpt-4o-mini': 'GPT-4o Mini',
       'openai/gpt-3.5-turbo': 'GPT-3.5 Turbo',
     },
   },
