@@ -89,6 +89,13 @@ function Sidebar({ chats, currentChatId, onNewChat, onSelectChat, onToggleSaveCh
         >
           ⚙️ Admin
         </Link>
+        <Link
+          to="/transfers"
+          className={`nav-link ${location.pathname === '/transfers' ? 'active' : ''}`}
+          onClick={onClose}
+        >
+          📁 File Transfers
+        </Link>
       </nav>
 
       <div className="chat-list">

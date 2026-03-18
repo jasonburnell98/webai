@@ -156,9 +156,85 @@ GRANT ALL ON usage_logs TO anon;
 
 
 -- =============================================
+-- FILE TRANSFERS
+-- =============================================
+
+-- Each "package" a sender sends to a recipient (identified by email)
+CREATE TABLE IF NOT EXISTS file_transfers (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  sender_id TEXT NOT NULL,            -- Clerk user ID of sender
+  sender_email TEXT NOT NULL,
+  recipient_email TEXT NOT NULL,      -- email of the intended recipient
+  message TEXT,                       -- optional note from sender
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'accepted', 'expired')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  expires_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '7 days')
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_transfers_sender    ON file_transfers(sender_id);
+CREATE INDEX IF NOT EXISTS idx_file_transfers_recipient ON file_transfers(recipient_email);
+CREATE INDEX IF NOT EXISTS idx_file_transfers_created   ON file_transfers(created_at DESC);
+
+ALTER TABLE file_transfers DISABLE ROW LEVEL SECURITY;
+
+-- Individual files within a transfer package
+CREATE TABLE IF NOT EXISTS transfer_files (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  transfer_id UUID NOT NULL REFERENCES file_transfers(id) ON DELETE CASCADE,
+  file_name TEXT NOT NULL,
+  file_size BIGINT,
+  storage_path TEXT NOT NULL,   -- path in Supabase Storage: {sender_id}/{transfer_id}/{filename}
+  content_type TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_transfer_files_transfer ON transfer_files(transfer_id);
+
+ALTER TABLE transfer_files DISABLE ROW LEVEL SECURITY;
+
+-- Grant anon role access (matches Option A strategy in use for other tables)
+GRANT ALL ON file_transfers TO anon;
+GRANT ALL ON transfer_files TO anon;
+
+
+-- =============================================
+-- SUPABASE STORAGE SETUP
+-- =============================================
+
+-- Step 1: Create the private bucket (run this OR create it via the dashboard)
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('file-transfers', 'file-transfers', false)
+ON CONFLICT (id) DO NOTHING;
+
+-- Step 2: Storage RLS policies for the anon key (matches Option A strategy)
+-- These are REQUIRED because storage.objects has RLS enabled by default.
+
+-- Allow uploads
+CREATE POLICY "anon can upload to file-transfers"
+ON storage.objects FOR INSERT
+TO anon
+WITH CHECK (bucket_id = 'file-transfers');
+
+-- Allow downloads / signed-URL generation
+CREATE POLICY "anon can read from file-transfers"
+ON storage.objects FOR SELECT
+TO anon
+USING (bucket_id = 'file-transfers');
+
+-- Allow deletions (sender deleting their own transfers)
+CREATE POLICY "anon can delete from file-transfers"
+ON storage.objects FOR DELETE
+TO anon
+USING (bucket_id = 'file-transfers');
+
+
+-- =============================================
 -- COMMENTS
 -- =============================================
 COMMENT ON TABLE user_profiles IS 'User profiles keyed by Clerk user ID. Stores tier and usage data.';
 COMMENT ON TABLE conversations IS 'Chat conversation metadata keyed by Clerk user ID.';
 COMMENT ON TABLE messages IS 'Individual messages within conversations.';
 COMMENT ON TABLE usage_logs IS 'Optional analytics log of model usage per user.';
+COMMENT ON TABLE file_transfers IS 'Secure file transfer packages sent from one user to another by recipient email.';
+COMMENT ON TABLE transfer_files IS 'Individual files within a file_transfers package, stored in Supabase Storage bucket "file-transfers".';

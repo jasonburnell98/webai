@@ -8,6 +8,7 @@ import ChatPage from './pages/ChatPage'
 import AdminPage from './pages/AdminPage'
 import AuthPage from './pages/AuthPage'
 import PricingPage from './pages/PricingPage'
+import TransfersPage from './pages/TransfersPage'
 import {
   getConversations,
   getConversationWithMessages,
@@ -578,6 +579,7 @@ function AppContent() {
             }
           />
           <Route path="/pricing" element={<PricingPage />} />
+          <Route path="/transfers" element={<TransfersPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

@@ -379,3 +379,192 @@ export async function getMessages(conversationId: string): Promise<Message[]> {
   }
   return data || []
 }
+
+// =============================================
+// FILE TRANSFER TYPES
+// =============================================
+
+export interface FileTransfer {
+  id: string
+  sender_id: string
+  sender_email: string
+  recipient_email: string
+  message: string | null
+  status: 'pending' | 'accepted' | 'expired'
+  created_at: string
+  expires_at: string
+  files?: TransferFile[]
+}
+
+export interface TransferFile {
+  id: string
+  transfer_id: string
+  file_name: string
+  file_size: number | null
+  storage_path: string
+  content_type: string | null
+  created_at: string
+}
+
+// =============================================
+// FILE TRANSFER OPERATIONS
+// =============================================
+
+const STORAGE_BUCKET = 'file-transfers'
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  // 50 MB per file
+const SIGNED_URL_EXPIRES_IN = 3600             // 1 hour
+
+/**
+ * Upload a single file to Supabase Storage.
+ * Returns the storage path on success, or null on failure.
+ */
+export async function uploadTransferFile(
+  file: File,
+  senderId: string,
+  transferId: string
+): Promise<string | null> {
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    console.error(`File "${file.name}" exceeds 50 MB limit`)
+    return null
+  }
+
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+  const storagePath = `${senderId}/${transferId}/${safeName}`
+
+  const { error } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .upload(storagePath, file, {
+      contentType: file.type || 'application/octet-stream',
+      upsert: false,
+    })
+
+  if (error) {
+    console.error('Error uploading file:', error)
+    return null
+  }
+  return storagePath
+}
+
+/**
+ * Create a file_transfers row plus transfer_files rows for each uploaded file.
+ */
+export async function createFileTransfer(
+  senderId: string,
+  senderEmail: string,
+  recipientEmail: string,
+  message: string,
+  files: Array<{ name: string; size: number; storagePath: string; contentType: string }>
+): Promise<FileTransfer | null> {
+  // Insert the transfer header
+  const { data: transfer, error: transferError } = await supabase
+    .from('file_transfers')
+    .insert({
+      sender_id: senderId,
+      sender_email: senderEmail,
+      recipient_email: recipientEmail.toLowerCase().trim(),
+      message: message || null,
+    })
+    .select()
+    .maybeSingle()
+
+  if (transferError || !transfer) {
+    console.error('Error creating file transfer:', transferError)
+    return null
+  }
+
+  // Insert each file record
+  const fileRows = files.map((f) => ({
+    transfer_id: transfer.id,
+    file_name: f.name,
+    file_size: f.size,
+    storage_path: f.storagePath,
+    content_type: f.contentType || null,
+  }))
+
+  const { error: filesError } = await supabase.from('transfer_files').insert(fileRows)
+
+  if (filesError) {
+    console.error('Error saving transfer file records:', filesError)
+    // Clean up the transfer header if files failed
+    await supabase.from('file_transfers').delete().eq('id', transfer.id)
+    return null
+  }
+
+  return transfer as FileTransfer
+}
+
+/**
+ * Fetch all transfers sent by the current user.
+ */
+export async function getSentTransfers(senderId: string): Promise<FileTransfer[]> {
+  const { data, error } = await supabase
+    .from('file_transfers')
+    .select('*, files:transfer_files(*)')
+    .eq('sender_id', senderId)
+    .order('created_at', { ascending: false })
+
+  if (error) {
+    console.error('Error fetching sent transfers:', error)
+    return []
+  }
+  return (data || []) as FileTransfer[]
+}
+
+/**
+ * Fetch all transfers addressed to the current user's email.
+ */
+export async function getInboxTransfers(recipientEmail: string): Promise<FileTransfer[]> {
+  const { data, error } = await supabase
+    .from('file_transfers')
+    .select('*, files:transfer_files(*)')
+    .eq('recipient_email', recipientEmail.toLowerCase().trim())
+    .order('created_at', { ascending: false })
+
+  if (error) {
+    console.error('Error fetching inbox transfers:', error)
+    return []
+  }
+  return (data || []) as FileTransfer[]
+}
+
+/**
+ * Generate a time-limited signed URL for downloading a file.
+ */
+export async function getSignedDownloadUrl(storagePath: string): Promise<string | null> {
+  const { data, error } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .createSignedUrl(storagePath, SIGNED_URL_EXPIRES_IN)
+
+  if (error || !data?.signedUrl) {
+    console.error('Error generating signed URL:', error)
+    return null
+  }
+  return data.signedUrl
+}
+
+/**
+ * Delete a file transfer (and its storage files) — sender only.
+ */
+export async function deleteFileTransfer(
+  transferId: string,
+  files: TransferFile[]
+): Promise<boolean> {
+  // Remove files from storage
+  const paths = files.map((f) => f.storage_path)
+  if (paths.length > 0) {
+    const { error: storageError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .remove(paths)
+    if (storageError) {
+      console.error('Error removing files from storage:', storageError)
+    }
+  }
+
+  // Delete DB row (cascades to transfer_files)
+  const { error } = await supabase.from('file_transfers').delete().eq('id', transferId)
+  if (error) {
+    console.error('Error deleting transfer:', error)
+    return false
+  }
+  return true
+}
