@@ -28,8 +28,6 @@ const ACCEPTED_TYPES = [
   'application/json',
 ]
 
-const MAX_FILE_SIZE_MB = 50
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -64,10 +62,6 @@ export default function FileUploader({ onFilesChange, disabled }: FileUploaderPr
     const valid: SelectedFile[] = []
 
     arr.forEach((file) => {
-      if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
-        newErrors.push(`"${file.name}" exceeds the 50 MB limit`)
-        return
-      }
       // Avoid duplicates by name+size
       const dup = selectedFiles.find((f) => f.file.name === file.name && f.file.size === file.size)
       if (dup) return
@@ -141,7 +135,7 @@ export default function FileUploader({ onFilesChange, disabled }: FileUploaderPr
           {dragging ? 'Drop files here' : 'Click or drag files here'}
         </p>
         <p className="drop-zone-hint">
-          Images, PDFs, Office docs, ZIP, JSON, text — up to 50 MB each
+          Images, PDFs, Office docs, ZIP, JSON, text
         </p>
       </div>
 

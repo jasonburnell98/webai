@@ -7,6 +7,8 @@ import {
   getSentTransfers,
   getInboxTransfers,
   getSignedDownloadUrl,
+  downloadChunkedFile,
+  isChunkedStoragePath,
   deleteFileTransfer,
   type FileTransfer,
   type TransferFile,
@@ -57,25 +59,49 @@ interface TransferCardProps {
 
 function TransferCard({ transfer, mode, onDelete }: TransferCardProps) {
   const [downloading, setDownloading] = useState<string | null>(null)
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({})
   const [expanded, setExpanded] = useState(false)
   const expired = isExpired(transfer.expires_at)
   const files = transfer.files ?? []
 
   const handleDownload = async (file: TransferFile) => {
     setDownloading(file.id)
-    const url = await getSignedDownloadUrl(file.storage_path)
-    setDownloading(null)
-    if (!url) {
-      alert('Could not generate download link. Please try again.')
-      return
+    setDownloadProgress((prev) => ({ ...prev, [file.id]: 0 }))
+
+    try {
+      if (isChunkedStoragePath(file.storage_path)) {
+        // Large file — fetch and reassemble chunks in the browser
+        await downloadChunkedFile(
+          file.storage_path,
+          file.file_name,
+          (pct) => setDownloadProgress((prev) => ({ ...prev, [file.id]: pct }))
+        )
+      } else {
+        // Small file — single signed URL download
+        const url = await getSignedDownloadUrl(file.storage_path)
+        if (!url) {
+          alert('Could not generate download link. Please try again.')
+        } else {
+          const a = document.createElement('a')
+          a.href = url
+          a.download = file.file_name
+          a.target = '_blank'
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+        }
+      }
+    } catch (err) {
+      console.error('Download error:', err)
+      alert('Download failed. Please try again.')
     }
-    const a = document.createElement('a')
-    a.href = url
-    a.download = file.file_name
-    a.target = '_blank'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
+
+    setDownloading(null)
+    setDownloadProgress((prev) => {
+      const next = { ...prev }
+      delete next[file.id]
+      return next
+    })
   }
 
   return (
@@ -129,14 +155,27 @@ function TransferCard({ transfer, mode, onDelete }: TransferCardProps) {
                   )}
                 </div>
                 {!expired && (
-                  <button
-                    className="transfer-download-btn"
-                    onClick={() => handleDownload(file)}
-                    disabled={downloading === file.id}
-                    title="Download file"
-                  >
-                    {downloading === file.id ? '⏳' : '⬇️'} Download
-                  </button>
+                  <div className="transfer-download-col">
+                    <button
+                      className="transfer-download-btn"
+                      onClick={() => handleDownload(file)}
+                      disabled={downloading === file.id}
+                      title="Download file"
+                    >
+                      {downloading === file.id ? '⏳' : '⬇️'} Download
+                    </button>
+                    {downloading === file.id && isChunkedStoragePath(file.storage_path) && (
+                      <div className="download-progress-wrap">
+                        <div className="upload-progress-bar-track">
+                          <div
+                            className="upload-progress-bar-fill"
+                            style={{ width: `${downloadProgress[file.id] ?? 0}%` }}
+                          />
+                        </div>
+                        <span className="upload-progress-pct">{downloadProgress[file.id] ?? 0}%</span>
+                      </div>
+                    )}
+                  </div>
                 )}
               </li>
             ))}
@@ -176,6 +215,7 @@ export default function TransfersPage() {
   const [sendError, setSendError] = useState<string | null>(null)
   const [sendSuccess, setSendSuccess] = useState(false)
   const [formKey, setFormKey] = useState(0)
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
 
   // Inbox / Sent lists — loaded on demand when the tab is clicked
   const [inboxTransfers, setInboxTransfers] = useState<FileTransfer[]>([])
@@ -234,11 +274,19 @@ export default function TransfersPage() {
       contentType: string
     }> = []
 
+    setUploadProgress({})
+
     for (const file of files) {
-      const storagePath = await uploadTransferFile(file, user.id, tempTransferId)
+      const storagePath = await uploadTransferFile(
+        file,
+        user.id,
+        tempTransferId,
+        (pct) => setUploadProgress((prev) => ({ ...prev, [file.name]: pct }))
+      )
       if (!storagePath) {
         setSendError(`Failed to upload "${file.name}". Please try again.`)
         setSending(false)
+        setUploadProgress({})
         return
       }
       uploadedFiles.push({
@@ -265,6 +313,7 @@ export default function TransfersPage() {
 
     setSendSuccess(true)
     setSending(false)
+    setUploadProgress({})
     setFiles([])
     setRecipientEmail('')
     setMessage('')
@@ -369,6 +418,29 @@ export default function TransfersPage() {
               <label className="send-form-label">Files *</label>
               <FileUploader onFilesChange={setFiles} disabled={sending} />
             </div>
+
+            {/* Per-file upload progress */}
+            {sending && Object.keys(uploadProgress).length > 0 && (
+              <div className="upload-progress-list">
+                {files.map((file) => {
+                  const pct = uploadProgress[file.name] ?? 0
+                  return (
+                    <div key={file.name} className="upload-progress-item">
+                      <div className="upload-progress-label">
+                        <span className="upload-progress-filename">{file.name}</span>
+                        <span className="upload-progress-pct">{pct}%</span>
+                      </div>
+                      <div className="upload-progress-bar-track">
+                        <div
+                          className="upload-progress-bar-fill"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
 
             {sendError && (
               <div className="transfer-error-banner">⚠️ {sendError}</div>

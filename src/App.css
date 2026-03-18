@@ -2075,6 +2075,55 @@ code.locked {
   font-size: 0.875rem;
 }
 
+/* ── Upload Progress ── */
+.upload-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+
+.upload-progress-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.upload-progress-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.upload-progress-filename {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80%;
+}
+
+.upload-progress-pct {
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.upload-progress-bar-track {
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.upload-progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 99px;
+  transition: width 0.2s ease;
+}
+
 /* ── Send Form ── */
 .send-form {
   display: flex;
@@ -2507,6 +2556,31 @@ code.locked {
 .transfer-download-btn:disabled {
   opacity: 0.6;
   cursor: wait;
+}
+
+.transfer-download-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+.download-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 120px;
+}
+
+.download-progress-wrap .upload-progress-bar-track {
+  flex: 1;
+}
+
+.download-progress-wrap .upload-progress-pct {
+  font-size: 0.75rem;
+  min-width: 32px;
+  text-align: right;
 }
 
 .transfer-delete-btn {

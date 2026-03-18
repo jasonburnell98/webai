@@ -411,38 +411,126 @@ export interface TransferFile {
 // =============================================
 
 const STORAGE_BUCKET = 'file-transfers'
-const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  // 50 MB per file
-const SIGNED_URL_EXPIRES_IN = 3600             // 1 hour
+const SIGNED_URL_EXPIRES_IN = 3600   // 1 hour
+const CHUNK_SIZE = 45 * 1024 * 1024  // 45 MB — safely under Supabase's free-tier 50 MB limit
+
+/** Returns true if the storage path represents a chunked (multi-part) file. */
+export function isChunkedStoragePath(storagePath: string): boolean {
+  return storagePath.includes('::chunks::')
+}
+
+function parseChunkedPath(storagePath: string): { basePath: string; totalChunks: number } {
+  const sep = '::chunks::'
+  const idx = storagePath.indexOf(sep)
+  return {
+    basePath: storagePath.slice(0, idx),
+    totalChunks: parseInt(storagePath.slice(idx + sep.length), 10),
+  }
+}
 
 /**
- * Upload a single file to Supabase Storage.
- * Returns the storage path on success, or null on failure.
+ * Upload a file to Supabase Storage.
+ *
+ * • Files ≤ 45 MB  →  uploaded as a single object (standard free-tier upload).
+ * • Files  > 45 MB →  automatically split into 45 MB chunks, each uploaded
+ *                     individually (all under the 50 MB free-tier limit).
+ *                     The returned path encodes the chunk count so the
+ *                     download side can reassemble them byte-for-byte.
+ *
+ * No compression or re-encoding is performed — the file is restored to its
+ * exact original state on download.
  */
 export async function uploadTransferFile(
   file: File,
   senderId: string,
-  transferId: string
+  transferId: string,
+  onProgress?: (percentage: number) => void
 ): Promise<string | null> {
-  if (file.size > MAX_FILE_SIZE_BYTES) {
-    console.error(`File "${file.name}" exceeds 50 MB limit`)
-    return null
-  }
-
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
-  const storagePath = `${senderId}/${transferId}/${safeName}`
+  const basePath = `${senderId}/${transferId}/${safeName}`
 
-  const { error } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .upload(storagePath, file, {
-      contentType: file.type || 'application/octet-stream',
-      upsert: false,
-    })
-
-  if (error) {
-    console.error('Error uploading file:', error)
-    return null
+  // ── Single file (≤ 45 MB) ─────────────────────────────────────────────
+  if (file.size <= CHUNK_SIZE) {
+    onProgress?.(0)
+    const { error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(basePath, file, {
+        contentType: file.type || 'application/octet-stream',
+        upsert: false,
+      })
+    if (error) {
+      console.error('Error uploading file:', error)
+      return null
+    }
+    onProgress?.(100)
+    return basePath
   }
-  return storagePath
+
+  // ── Chunked upload (> 45 MB) ──────────────────────────────────────────
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE
+    const end = Math.min(start + CHUNK_SIZE, file.size)
+    const chunk = file.slice(start, end) // Blob.slice — raw bytes, no copying yet
+
+    const { error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(`${basePath}_chunk_${i}`, chunk, {
+        contentType: 'application/octet-stream',
+        upsert: false,
+      })
+
+    if (error) {
+      console.error(`Error uploading chunk ${i + 1}/${totalChunks}:`, error)
+      return null
+    }
+
+    onProgress?.(Math.round(((i + 1) / totalChunks) * 100))
+  }
+
+  // Encode chunk count in the path so the download side can reassemble
+  return `${basePath}::chunks::${totalChunks}`
+}
+
+/**
+ * Download a chunked file by fetching every part and concatenating them in
+ * the browser. The resulting file is byte-for-byte identical to the original.
+ */
+export async function downloadChunkedFile(
+  storagePath: string,
+  fileName: string,
+  onProgress?: (percentage: number) => void
+): Promise<void> {
+  const { basePath, totalChunks } = parseChunkedPath(storagePath)
+  const chunks: Blob[] = []
+
+  for (let i = 0; i < totalChunks; i++) {
+    const { data, error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .createSignedUrl(`${basePath}_chunk_${i}`, SIGNED_URL_EXPIRES_IN)
+
+    if (error || !data?.signedUrl) {
+      throw new Error(`Failed to get signed URL for chunk ${i}`)
+    }
+
+    const response = await fetch(data.signedUrl)
+    if (!response.ok) throw new Error(`Failed to fetch chunk ${i}`)
+
+    chunks.push(await response.blob())
+    onProgress?.(Math.round(((i + 1) / totalChunks) * 100))
+  }
+
+  // Concatenate — Blob constructor preserves exact bytes, no quality loss
+  const combined = new Blob(chunks)
+  const url = URL.createObjectURL(combined)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
 
 /**
@@ -544,17 +632,29 @@ export async function getSignedDownloadUrl(storagePath: string): Promise<string 
 
 /**
  * Delete a file transfer (and its storage files) — sender only.
+ * Handles both single files and chunked files.
  */
 export async function deleteFileTransfer(
   transferId: string,
   files: TransferFile[]
 ): Promise<boolean> {
-  // Remove files from storage
-  const paths = files.map((f) => f.storage_path)
-  if (paths.length > 0) {
+  // Expand chunked paths into individual chunk paths
+  const allPaths: string[] = []
+  for (const f of files) {
+    if (isChunkedStoragePath(f.storage_path)) {
+      const { basePath, totalChunks } = parseChunkedPath(f.storage_path)
+      for (let i = 0; i < totalChunks; i++) {
+        allPaths.push(`${basePath}_chunk_${i}`)
+      }
+    } else {
+      allPaths.push(f.storage_path)
+    }
+  }
+
+  if (allPaths.length > 0) {
     const { error: storageError } = await supabase.storage
       .from(STORAGE_BUCKET)
-      .remove(paths)
+      .remove(allPaths)
     if (storageError) {
       console.error('Error removing files from storage:', storageError)
     }
